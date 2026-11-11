@@ -1,0 +1,20 @@
+[project]
+name = "altium-schlib-symbol-editor"
+version = "0.1.0"
+description = "编辑 Altium SchLib 中带多种显示模式的符号"
+requires-python = ">=3.10"
+dependencies = [
+    "olefile>=0.46",
+    "matplotlib>=3.7",
+    "loguru>=0.7",
+]
+
+[project.gui-scripts]
+altium-schlib-symbol-editor = "gui:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["draw", "gui", "issues", "library", "ole_storage", "records"]

@@ -1,0 +1,13 @@
+__pycache__/
+build/
+dist/
+release/
+*.spec
+*.py[cod]
+.venv/
+*.bak
+.idea/
+*.SchLib
+*.PcbLib
+lib_logger/log/
+tests/
