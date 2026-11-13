@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
-from records import PinInfo, Symbol, mode_letter
+from i18n import tr
+from records import PinInfo, Symbol, default_mode_name
 
 KIND_COUNT = "引脚数量"
 KIND_NAME = "引脚名称"
@@ -24,19 +25,20 @@ class PinIssue:
     message: str
 
 
-def check_symbol(symbol: Symbol) -> list[PinIssue]:
+def check_symbol(symbol: Symbol, lang: str = "zh") -> list[PinIssue]:
     """按显示模式检查引脚数量、名称、重复位号，以及隐藏引脚的名称。"""
 
     pins = [pin for pin in symbol.pins() if not pin.broken]
     modes = list(range(symbol.mode_count))
+    names = {index: symbol.mode_name(index) for index in modes}
     issues: list[PinIssue] = []
-    issues.extend(_empty_and_duplicates(symbol.name, modes, pins))
-    issues.extend(_compare_modes(symbol.name, modes, pins))
-    issues.extend(_hidden_names(symbol.name, pins))
+    issues.extend(_empty_and_duplicates(symbol.name, modes, pins, lang, names))
+    issues.extend(_compare_modes(symbol.name, modes, pins, lang, names))
+    issues.extend(_hidden_names(symbol.name, pins, lang, names))
     return issues
 
 
-def pin_row_note(pins: list[PinInfo], mode_count: int, pin: PinInfo) -> str:
+def pin_row_note(pins: list[PinInfo], mode_count: int, pin: PinInfo, lang: str = "zh") -> str:
     """引脚表里给当前行用的短标记。同一模式内不区分 Part。"""
 
     if pin.broken:
@@ -57,11 +59,21 @@ def pin_row_note(pins: list[PinInfo], mode_count: int, pin: PinInfo) -> str:
         elif len(set(bundles)) > 1:
             notes.append("名称不一致")
     if pin.hidden and pin.name not in HIDDEN_PIN_NAMES:
-        notes.append(hidden_pin_rule())
-    return "、".join(notes)
+        notes.append(hidden_pin_rule(lang))
+    return tr(lang, "detail_sep").join(notes) if lang == "en" else "、".join(notes)
 
 
-def _empty_and_duplicates(symbol: str, modes: list[int], pins: list[PinInfo]) -> list[PinIssue]:
+def _mode_label(mode: int, names: dict[int, str]) -> str:
+    return names.get(mode) or default_mode_name(mode)
+
+
+def _empty_and_duplicates(
+    symbol: str,
+    modes: list[int],
+    pins: list[PinInfo],
+    lang: str,
+    names: dict[int, str],
+) -> list[PinIssue]:
     issues: list[PinIssue] = []
     for mode in modes:
         in_mode = [pin for pin in pins if pin.mode == mode]
@@ -73,7 +85,7 @@ def _empty_and_duplicates(symbol: str, modes: list[int], pins: list[PinInfo]) ->
                     part_id=None,
                     mode=mode,
                     kind=KIND_NAME,
-                    message=f"模式 {mode_letter(mode)} 有 {empty} 个位号为空的引脚",
+                    message=tr(lang, "empty_designators", name=_mode_label(mode, names), count=empty),
                 )
             )
         counts = Counter(pin.designator for pin in in_mode if pin.designator != "")
@@ -85,24 +97,32 @@ def _empty_and_duplicates(symbol: str, modes: list[int], pins: list[PinInfo]) ->
                         part_id=None,
                         mode=mode,
                         kind=KIND_DUP,
-                        message=f"模式 {mode_letter(mode)} 的位号 {designator} 重复 {count} 次",
+                        message=tr(lang, "duplicate_designator", name=_mode_label(mode, names), designator=designator, count=count),
                     )
                 )
     return issues
 
 
-def _compare_modes(symbol: str, modes: list[int], pins: list[PinInfo]) -> list[PinIssue]:
+def _compare_modes(
+    symbol: str,
+    modes: list[int],
+    pins: list[PinInfo],
+    lang: str,
+    names: dict[int, str],
+) -> list[PinIssue]:
     issues: list[PinIssue] = []
     counts = [sum(1 for pin in pins if pin.mode == mode) for mode in modes]
     if len(set(counts)) > 1:
-        detail = "，".join(f"模式 {mode_letter(mode)} {count} 个" for mode, count in zip(modes, counts))
+        detail = tr(lang, "detail_sep").join(
+            tr(lang, "mode_count_item", name=_mode_label(mode, names), count=count) for mode, count in zip(modes, counts)
+        )
         issues.append(
             PinIssue(
                 symbol=symbol,
                 part_id=None,
                 mode=None,
                 kind=KIND_COUNT,
-                message=f"引脚数量不一致：{detail}",
+                message=tr(lang, "count_mismatch", detail=detail),
             )
         )
 
@@ -121,13 +141,19 @@ def _compare_modes(symbol: str, modes: list[int], pins: list[PinInfo]) -> list[P
                     part_id=None,
                     mode=None,
                     kind=KIND_NAME,
-                    message=f"位号 {designator} 在{_mode_list(present)}有，在{_mode_list(missing)}没有",
+                    message=tr(
+                        lang,
+                        "designator_missing",
+                        designator=designator,
+                        present=_mode_list(present, lang, names),
+                        missing=_mode_list(missing, lang, names),
+                    ),
                 )
             )
         differing = {bundle for bundle in bundles if bundle}
         if len(differing) > 1:
-            detail = "，".join(
-                f"模式 {mode_letter(mode)} 为 {_show_names(bundle)}"
+            detail = tr(lang, "detail_sep").join(
+                tr(lang, "mode_names", name=_mode_label(mode, names), names=_show_names(bundle, lang))
                 for mode, bundle in zip(modes, bundles)
                 if bundle
             )
@@ -137,45 +163,46 @@ def _compare_modes(symbol: str, modes: list[int], pins: list[PinInfo]) -> list[P
                     part_id=None,
                     mode=None,
                     kind=KIND_NAME,
-                    message=f"位号 {designator} 的名称不一致：{detail}",
+                    message=tr(lang, "name_mismatch", designator=designator, detail=detail),
                 )
             )
     return issues
 
 
-def _hidden_names(symbol: str, pins: list[PinInfo]) -> list[PinIssue]:
+def _hidden_names(symbol: str, pins: list[PinInfo], lang: str, names: dict[int, str]) -> list[PinIssue]:
     issues: list[PinIssue] = []
     for pin in pins:
         if not pin.hidden or pin.name in HIDDEN_PIN_NAMES:
             continue
-        place = f"模式 {mode_letter(pin.mode)}"
         if pin.designator:
-            place += f" 位号 {pin.designator}"
-        shown = pin.name if pin.name else "（空）"
+            place = tr(lang, "hidden_place_pin", name=_mode_label(pin.mode, names), designator=pin.designator)
+        else:
+            place = tr(lang, "hidden_place", name=_mode_label(pin.mode, names))
+        shown = pin.name if pin.name else tr(lang, "empty_pin_name")
         issues.append(
             PinIssue(
                 symbol=symbol,
                 part_id=None,
                 mode=pin.mode,
                 kind=KIND_HIDDEN,
-                message=f"{place} 已隐藏，名称是「{shown}」，{hidden_pin_rule()}",
+                message=tr(lang, "hidden_message", place=place, shown=shown, rule=hidden_pin_rule(lang)),
             )
         )
     return issues
 
 
-def hidden_pin_rule() -> str:
+def hidden_pin_rule(lang: str = "zh") -> str:
     """根据 HIDDEN_PIN_NAMES 生成隐藏引脚的说明。"""
 
-    return f"仅允许名称为{' '.join(HIDDEN_PIN_NAMES)}的引脚设置为不可见"
+    return tr(lang, "hidden_rule", names=" ".join(HIDDEN_PIN_NAMES))
 
 
-def _mode_list(modes: list[int]) -> str:
-    return "、".join(f"模式 {mode_letter(mode)}" for mode in modes)
+def _mode_list(modes: list[int], lang: str, names: dict[int, str]) -> str:
+    return tr(lang, "list_sep").join(tr(lang, "mode_word", name=_mode_label(mode, names)) for mode in modes)
 
 
-def _show_names(names: tuple[str, ...]) -> str:
-    return "、".join(f"「{name}」" for name in names)
+def _show_names(names: tuple[str, ...], lang: str) -> str:
+    return tr(lang, "list_sep").join(tr(lang, "quote", name=name) for name in names)
 
 
 def _text_key(text: str) -> list[tuple[int, int] | tuple[int, str]]:

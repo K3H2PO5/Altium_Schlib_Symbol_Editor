@@ -7,10 +7,11 @@ from pathlib import Path
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import draw as draw_mod
+from i18n import localize_error, localize_note, tr
 from issues import check_symbol
 from library import Library, LibraryError, load_library, schlib_files
 from ole_storage import OleStorageError
-from records import PinInfo, SchlibFormatError, Symbol, mode_letter
+from records import PinInfo, SchlibFormatError, Symbol, default_mode_name
 from version import VERSION
 
 APP_TITLE = f"Altium_Schlib_Symbol_Editor {VERSION}"
@@ -38,9 +39,11 @@ class EditorApp(tk.Tk):
         self._pin_name_resized = False
         self._syncing_pin_widths = False
         self._heading_font: tkfont.Font | None = None
-        self.path_var = tk.StringVar(value="尚未打开库文件")
+        self.lang = "zh"
+        self.path_var = tk.StringVar(value=self.t("not_open"))
         self.summary_var = tk.StringVar(value="")
-        self._status_text = "打开一个 SchLib 或文件夹。左侧只列出有多种显示模式的符号。"
+        self._status_spec: tuple[str, dict] = ("status_ready", {})
+        self._status_text = self.t("status_ready")
         self.status_var = tk.StringVar(value=self._status_text)
         self.filter_var = tk.StringVar()
         self.only_current_var = tk.BooleanVar(value=True)
@@ -49,6 +52,47 @@ class EditorApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Control-o>", lambda _event: self.open_library())
         self.bind("<Control-s>", lambda _event: self.save_library())
+
+    def t(self, key: str, **kwargs: object) -> str:
+        return tr(self.lang, key, **kwargs)
+
+    def _toggle_language(self) -> None:
+        self.lang = "en" if self.lang == "zh" else "zh"
+        self._apply_language()
+
+    def _apply_language(self) -> None:
+        self._lang_button.configure(text=self.t("lang_button"))
+        self._open_button.configure(text=self.t("open_schlib"))
+        self._folder_button.configure(text=self.t("open_folder"))
+        self._save_button.configure(text=self.t("save"))
+        self._close_button.configure(text=self.t("close_file"))
+        self._symbol_caption.configure(text=self.t("symbol_list"))
+        self._only_issues.configure(text=self.t("only_issues"))
+        self._filter_label.configure(text=self.t("filter"))
+        self._only_current.configure(text=self.t("only_current"))
+        self._edit_hint.configure(text=self.t("edit_hint"))
+        self.notebook.tab(self.check_tab, text=self.t("tab_check"))
+        self.notebook.tab(self.edit_tab, text=self.t("tab_edit"))
+        for key, title_key in (
+            ("symbol", "col_symbol"),
+            ("mode", "col_mode"),
+            ("kind", "col_kind"),
+            ("message", "col_detail"),
+        ):
+            self.issue_tree.heading(key, text=self.t(title_key))
+        if self._preview_missing is not None:
+            self._preview_missing.configure(text=self.t("no_matplotlib"))
+        if not self.libraries:
+            self.path_var.set(self.t("not_open"))
+        self._retranslate_status()
+        self._update_summary()
+        if self.libraries:
+            self._recheck()
+            self._fill_symbols()
+        else:
+            self._configure_symbol_tree()
+            self._configure_pin_tree(0)
+            self._draw(self.edit_preview, None, [])
 
     def _apply_font(self) -> None:
         style = ttk.Style(self)
@@ -61,10 +105,16 @@ class EditorApp(tk.Tk):
         self.rowconfigure(1, weight=1)
         bar = ttk.Frame(self, padding=(8, 8, 8, 4))
         bar.grid(row=0, column=0, sticky="ew")
-        ttk.Button(bar, text="打开 SchLib", command=self.open_library).pack(side="left")
-        ttk.Button(bar, text="打开文件夹", command=self.open_folder).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text="保存", command=self.save_library).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text="关闭文件", command=self.close_library).pack(side="left", padx=(6, 0))
+        self._open_button = ttk.Button(bar, text=self.t("open_schlib"), command=self.open_library)
+        self._open_button.pack(side="left")
+        self._folder_button = ttk.Button(bar, text=self.t("open_folder"), command=self.open_folder)
+        self._folder_button.pack(side="left", padx=(6, 0))
+        self._save_button = ttk.Button(bar, text=self.t("save"), command=self.save_library)
+        self._save_button.pack(side="left", padx=(6, 0))
+        self._close_button = ttk.Button(bar, text=self.t("close_file"), command=self.close_library)
+        self._close_button.pack(side="left", padx=(6, 0))
+        self._lang_button = ttk.Button(bar, text=self.t("lang_button"), command=self._toggle_language)
+        self._lang_button.pack(side="right")
         ttk.Label(bar, textvariable=self.path_var).pack(side="left", padx=12)
 
         paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
@@ -77,17 +127,20 @@ class EditorApp(tk.Tk):
         pane = ttk.Frame(parent, padding=(0, 0, 8, 0))
         pane.columnconfigure(0, weight=1)
         pane.rowconfigure(3, weight=1)
-        ttk.Label(pane, text="多种显示模式的符号").grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(
+        self._symbol_caption = ttk.Label(pane, text=self.t("symbol_list"))
+        self._symbol_caption.grid(row=0, column=0, sticky="w")
+        self._only_issues = ttk.Checkbutton(
             pane,
-            text="仅显示有问题的符号",
+            text=self.t("only_issues"),
             variable=self.only_issues_var,
             command=self._fill_symbols,
-        ).grid(row=1, column=0, sticky="w")
+        )
+        self._only_issues.grid(row=1, column=0, sticky="w")
         filter_row = ttk.Frame(pane)
         filter_row.grid(row=2, column=0, sticky="ew", pady=4)
         filter_row.columnconfigure(1, weight=1)
-        ttk.Label(filter_row, text="筛选").grid(row=0, column=0, sticky="w")
+        self._filter_label = ttk.Label(filter_row, text=self.t("filter"))
+        self._filter_label.grid(row=0, column=0, sticky="w")
         entry = ttk.Entry(filter_row, textvariable=self.filter_var)
         entry.grid(row=0, column=1, sticky="ew", padx=(6, 0))
         self.filter_var.trace_add("write", lambda *_args: self._fill_symbols())
@@ -117,8 +170,8 @@ class EditorApp(tk.Tk):
         self.notebook = ttk.Notebook(parent)
         self.check_tab = ttk.Frame(self.notebook, padding=8)
         self.edit_tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(self.check_tab, text="引脚检查")
-        self.notebook.add(self.edit_tab, text="编辑")
+        self.notebook.add(self.check_tab, text=self.t("tab_check"))
+        self.notebook.add(self.edit_tab, text=self.t("tab_edit"))
         self._build_check_tab()
         self._build_edit_tab()
         self.notebook.select(self.edit_tab)
@@ -127,24 +180,26 @@ class EditorApp(tk.Tk):
     def _build_check_tab(self) -> None:
         self.check_tab.columnconfigure(0, weight=1)
         self.check_tab.rowconfigure(1, weight=1)
-        ttk.Checkbutton(
+        self._only_current = ttk.Checkbutton(
             self.check_tab,
-            text="只看当前符号",
+            text=self.t("only_current"),
             variable=self.only_current_var,
             command=self._fill_issue_view,
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self._only_current.grid(row=0, column=0, sticky="w")
         self.issue_tree = ttk.Treeview(
             self.check_tab,
             columns=("symbol", "mode", "kind", "message"),
             show="headings",
             selectmode="browse",
         )
-        for key, title, width, stretch in (
-            ("symbol", "符号", 180, True),
-            ("mode", "模式", 60, False),
-            ("kind", "类别", 88, False),
-            ("message", "说明", 480, True),
+        for key, title_key, width, stretch in (
+            ("symbol", "col_symbol", 180, True),
+            ("mode", "col_mode", 60, False),
+            ("kind", "col_kind", 88, False),
+            ("message", "col_detail", 480, True),
         ):
+            title = self.t(title_key)
             self.issue_tree.heading(key, text=title)
             self.issue_tree.column(key, width=width, anchor="w", stretch=stretch)
         self.issue_tree.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
@@ -156,10 +211,8 @@ class EditorApp(tk.Tk):
     def _build_edit_tab(self) -> None:
         self.edit_tab.columnconfigure(0, weight=1)
         self.edit_tab.rowconfigure(1, weight=1)
-        ttk.Label(
-            self.edit_tab,
-            text="右键编辑名称，默认应用到全部显示模式。名称不一致的行显示为红色。在模式标题上右键可以左移、右移、删除或恢复。",
-        ).grid(row=0, column=0, sticky="w")
+        self._edit_hint = ttk.Label(self.edit_tab, text=self.t("edit_hint"), wraplength=920, justify="left")
+        self._edit_hint.grid(row=0, column=0, sticky="w")
         middle = ttk.Panedwindow(self.edit_tab, orient=tk.HORIZONTAL)
         middle.grid(row=1, column=0, sticky="nsew", pady=6)
         self._edit_split = middle
@@ -167,8 +220,8 @@ class EditorApp(tk.Tk):
         pin_pane.columnconfigure(0, weight=1)
         pin_pane.rowconfigure(0, weight=1)
         self.pin_tree = ttk.Treeview(pin_pane, columns=("designator",), show="headings", selectmode="browse")
-        self.pin_tree.heading("designator", text="位号")
-        designator_width = self._heading_width("位号")
+        self.pin_tree.heading("designator", text=self.t("col_designator"))
+        designator_width = self._heading_width(self.t("col_designator"))
         self.pin_tree.column("designator", width=designator_width, minwidth=designator_width, stretch=False, anchor="w")
         self.pin_tree.tag_configure("mismatch", foreground="#a32020")
         self.pin_tree.grid(row=0, column=0, sticky="nsew")
@@ -180,6 +233,7 @@ class EditorApp(tk.Tk):
         self.pin_tree.configure(yscrollcommand=pin_scroll.set, xscrollcommand=pin_xscroll.set)
         self.pin_tree.bind("<<TreeviewSelect>>", lambda _event: self._redraw(self._selected_symbol()))
         self.pin_tree.bind("<Button-3>", self._on_pin_tree_right_click)
+        self._preview_missing: ttk.Label | None = None
         self._pin_menu: tk.Toplevel | None = None
         self._popup_token: object | None = None
         self.pin_tree.bind("<B1-Motion>", self._sync_pin_column_widths)
@@ -195,8 +249,9 @@ class EditorApp(tk.Tk):
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
         if not draw_mod.HAS_MATPLOTLIB:
-            label = ttk.Label(parent, text="未安装 matplotlib，不能预览符号。检查和编辑仍可使用。")
+            label = ttk.Label(parent, text=self.t("no_matplotlib"), wraplength=420, justify="left")
             label.grid(row=0, column=0, sticky="nsew")
+            self._preview_missing = label
             return None
         figure = draw_mod.ScrollFigure(parent)
         figure.grid(row=0, column=0, sticky="nsew")
@@ -207,8 +262,8 @@ class EditorApp(tk.Tk):
             return
         chosen = filedialog.askopenfilename(
             parent=self,
-            title="打开 SchLib",
-            filetypes=[("Altium SchLib", "*.SchLib"), ("所有文件", "*.*")],
+            title=self.t("open_schlib"),
+            filetypes=[("Altium SchLib", "*.SchLib"), (self.t("all_files"), "*.*")],
         )
         if not chosen:
             return
@@ -217,14 +272,14 @@ class EditorApp(tk.Tk):
     def open_folder(self) -> None:
         if not self._confirm_discard():
             return
-        chosen = filedialog.askdirectory(parent=self, title="打开文件夹")
+        chosen = filedialog.askdirectory(parent=self, title=self.t("open_folder"))
         if not chosen:
             return
         self.load_folder(Path(chosen))
 
     def close_library(self) -> None:
         if not self.libraries:
-            self._set_status("还没有打开库文件")
+            self._set_status_key("no_library")
             return
         had_changes = any(symbol.dirty for symbol in self._all_symbols())
         if not self._confirm_discard():
@@ -236,26 +291,26 @@ class EditorApp(tk.Tk):
         self.issues = {}
         self._mode_baselines = {}
         self.filter_var.set("")
-        self.path_var.set("尚未打开库文件")
+        self.path_var.set(self.t("not_open"))
         self._fill_symbols()
         self._recheck()
-        self._set_status("已保存并关闭" if saved else "已关闭")
+        self._set_status_key("closed_saved" if saved else "closed")
 
     def load_folder(self, folder: Path) -> None:
         try:
             files = schlib_files(folder)
         except LibraryError as exc:
-            messagebox.showerror("无法打开", str(exc), parent=self)
+            messagebox.showerror(self.t("open_failed"), localize_error(self.lang, str(exc)), parent=self)
             return
         if not files:
-            messagebox.showwarning("打开文件夹", "这个文件夹里没有 SchLib 文件。", parent=self)
+            messagebox.showwarning(self.t("open_folder"), self.t("folder_empty"), parent=self)
             return
         self.configure(cursor="watch")
         libraries: list[Library] = []
         failed: list[str] = []
         try:
             for index, file in enumerate(files, start=1):
-                self.status_var.set(f"正在读取 {index}/{len(files)} {file.name}")
+                self._set_status_key("reading_named", index=index, total=len(files), name=file.name)
                 self.update_idletasks()
                 try:
                     libraries.append(load_library(file))
@@ -264,60 +319,60 @@ class EditorApp(tk.Tk):
         finally:
             self.configure(cursor="")
         if not libraries:
-            messagebox.showerror("无法打开", "\n".join(failed) or "没有读到 SchLib。", parent=self)
+            messagebox.showerror(self.t("open_failed"), "\n".join(failed) or self.t("nothing_read"), parent=self)
             return
         symbol_count = sum(len(library.symbols) for library in libraries)
         self._use_libraries(
             libraries,
-            f"{folder}    {len(libraries)} 个 SchLib",
-            "已打开文件夹",
+            self.t("folder_label", folder=folder, count=len(libraries)),
+            "opened_folder",
         )
         skipped = [(library.path.name, name, err) for library in libraries for name, err in library.skipped]
         if failed or skipped or symbol_count == 0:
             lines: list[str] = []
             if symbol_count == 0:
-                lines.append("没有找到具备多种显示模式的符号。")
+                lines.append(self.t("no_multi_mode"))
             if failed:
-                lines.append(f"有 {len(failed)} 个文件无法打开。")
+                lines.append(self.t("files_failed", count=len(failed)))
                 lines.extend(failed[:6])
             if skipped:
-                lines.append(f"有 {len(skipped)} 个符号无法读取。")
+                lines.append(self.t("symbols_unreadable", count=len(skipped)))
                 lines.extend(f"{file_name}/{name}: {err}" for file_name, name, err in skipped[:6])
-            messagebox.showwarning("打开文件夹", "\n".join(lines), parent=self)
+            messagebox.showwarning(self.t("open_folder"), "\n".join(lines), parent=self)
 
     def load_library(self, path: Path) -> None:
-        self.status_var.set("正在读取库文件…")
+        self._set_status_key("reading_library")
         self.configure(cursor="watch")
         self.update_idletasks()
 
         def progress(index: int, total: int) -> None:
-            self.status_var.set(f"正在读取 {index}/{total} …")
+            self._set_status_key("reading_progress", index=index, total=total)
             self.update_idletasks()
 
         try:
             library = load_library(path, progress)
         except (LibraryError, OSError) as exc:
             self.configure(cursor="")
-            messagebox.showerror("无法打开", str(exc), parent=self)
+            messagebox.showerror(self.t("open_failed"), localize_error(self.lang, str(exc)), parent=self)
             return
         self.configure(cursor="")
-        self._use_libraries([library], str(path), "已打开")
+        self._use_libraries([library], str(path), "opened")
         if library.skipped or not library.symbols:
             lines: list[str] = []
             if not library.symbols:
-                lines.append("没有找到具备多种显示模式的符号。")
+                lines.append(self.t("no_multi_mode"))
             if library.skipped:
-                lines.append(f"有 {len(library.skipped)} 个符号无法读取。")
+                lines.append(self.t("symbols_unreadable", count=len(library.skipped)))
                 lines.extend(f"{name}: {err}" for name, err in library.skipped[:6])
-            messagebox.showwarning("打开库", "\n".join(lines), parent=self)
+            messagebox.showwarning(self.t("open_library_title"), "\n".join(lines), parent=self)
 
     def save_library(self, *, confirm: bool = True) -> bool:
         dirty_libraries = [library for library in self.libraries if any(symbol.dirty for symbol in library.symbols)]
         if not self.libraries:
-            self._set_status("还没有打开库文件")
+            self._set_status_key("no_library")
             return False
         if not dirty_libraries:
-            self._set_status("没有需要保存的修改")
+            self._set_status_key("no_save_needed")
             return True
         if confirm:
             lines = []
@@ -326,12 +381,10 @@ class EditorApp(tk.Tk):
                 lines.append(library.path.name)
                 lines.extend(f"  {name}" for name in names[:8])
                 if len(names) > 8:
-                    lines.append(f"  …等 {len(names)} 个")
+                    lines.append(self.t("more_symbols", count=len(names)))
             agreed = messagebox.askyesno(
-                "保存",
-                "将写回原文件，并先在同目录的 History 文件夹里生成带时间戳的备份。\n"
-                "请先关闭正在使用这些库的 Altium Designer。\n\n"
-                + "\n".join(lines),
+                self.t("save"),
+                self.t("save_prompt", lines="\n".join(lines)),
                 parent=self,
             )
             if not agreed:
@@ -344,8 +397,8 @@ class EditorApp(tk.Tk):
                     backups.append(str(Path("History") / backup.name))
         except (LibraryError, SchlibFormatError, OleStorageError, OSError) as exc:
             messagebox.showerror(
-                "保存失败",
-                f"{exc}\n\n如果已经生成备份，失败的那个文件已从备份恢复。窗口里的修改还在。",
+                self.t("save_failed"),
+                self.t("save_failed_body", error=localize_error(self.lang, str(exc))),
                 parent=self,
             )
             self._recheck()
@@ -353,7 +406,7 @@ class EditorApp(tk.Tk):
             return False
         self._recheck()
         self._fill_symbols()
-        self._set_status(f"已保存 {len(backups)} 个库：" + "、".join(backups))
+        self._set_status_key("saved", count=len(backups), names=self.t("list_sep").join(backups))
         return True
 
     def _use_libraries(self, libraries: list[Library], label: str, status: str) -> None:
@@ -364,7 +417,7 @@ class EditorApp(tk.Tk):
         self.path_var.set(label)
         self._recheck()
         self._fill_symbols()
-        self._set_status(status)
+        self._set_status_key(status)
 
     def _index_symbols(self) -> None:
         self._symbols = {}
@@ -386,7 +439,7 @@ class EditorApp(tk.Tk):
     def _confirm_discard(self) -> bool:
         if not any(symbol.dirty for symbol in self._all_symbols()):
             return True
-        answer = messagebox.askyesnocancel("未保存的修改", "有修改还没有写入文件。要保存吗？", parent=self)
+        answer = messagebox.askyesnocancel(self.t("unsaved_title"), self.t("unsaved_body"), parent=self)
         if answer is None:
             return False
         if answer:
@@ -400,7 +453,7 @@ class EditorApp(tk.Tk):
     def _recheck(self) -> None:
         self.issues = {}
         for symbol in self._all_symbols():
-            self.issues[symbol.editor_iid] = check_symbol(symbol)
+            self.issues[symbol.editor_iid] = check_symbol(symbol, self.lang)
             self._refresh_symbol_row(symbol)
         self._fill_issue_view()
         self._update_summary()
@@ -449,16 +502,17 @@ class EditorApp(tk.Tk):
             columns.insert(1, "file")
         self.symbol_tree["columns"] = columns
         headings = {
-            "name": ("符号", 180, True, "w"),
-            "file": ("文件", 160, True, "w"),
-            "modes": ("模式", 48, False, "center"),
-            "parts": ("Part", 48, False, "center"),
-            "issues": ("问题", 48, False, "center"),
+            "name": ("col_symbol", 180, True, "w"),
+            "file": ("col_file", 180, True, "w"),
+            "modes": ("col_modes", 64, False, "center"),
+            "parts": ("col_part", 48, False, "center"),
+            "issues": ("col_issues", 64, False, "center"),
         }
         for key in columns:
-            title, width, stretch, anchor = headings[key]
+            title_key, width, stretch, anchor = headings[key]
+            title = self.t(title_key)
             self.symbol_tree.heading(key, text=title)
-            self.symbol_tree.column(key, width=width, stretch=stretch, anchor=anchor)
+            self.symbol_tree.column(key, width=max(width, self._heading_width(title)), stretch=stretch, anchor=anchor)
 
     def _symbol_values(self, symbol: Symbol) -> tuple:
         issues = self.issues.get(getattr(symbol, "editor_iid", ""), [])
@@ -531,13 +585,13 @@ class EditorApp(tk.Tk):
         self._redraw(symbol)
         self._fill_issue_view()
 
-    def _configure_pin_tree(self, mode_count: int) -> None:
+    def _configure_pin_tree(self, mode_count: int, names: list[str] | None = None) -> None:
         columns = ["designator"] + [f"m{index}" for index in range(mode_count)]
         if mode_count:
             columns.append("pad")
         self.pin_tree["columns"] = columns
-        self.pin_tree.heading("designator", text="位号")
-        designator_width = self._heading_width("位号")
+        self.pin_tree.heading("designator", text=self.t("col_designator"))
+        designator_width = self._heading_width(self.t("col_designator"))
         self.pin_tree.column(
             "designator",
             width=designator_width,
@@ -545,8 +599,8 @@ class EditorApp(tk.Tk):
             stretch=False,
             anchor="w",
         )
-        headings = [f"模式 {mode_letter(index)}" for index in range(mode_count)]
-        needed = max((self._heading_width(text) for text in headings), default=self._heading_width("模式 A"))
+        headings = list(names) if names is not None else [default_mode_name(index) for index in range(mode_count)]
+        needed = max((self._heading_width(text) for text in headings), default=self._heading_width("Normal"))
         if self._pin_name_resized:
             self._pin_name_width = max(self._pin_name_width, needed)
         else:
@@ -626,7 +680,7 @@ class EditorApp(tk.Tk):
         if symbol is None:
             self._configure_pin_tree(0)
             return
-        self._configure_pin_tree(symbol.mode_count)
+        self._configure_pin_tree(symbol.mode_count, [symbol.mode_name(index) for index in range(symbol.mode_count)])
         groups: dict[str, list[PinInfo]] = {}
         for pin in symbol.pins():
             if pin.broken:
@@ -700,10 +754,18 @@ class EditorApp(tk.Tk):
         if symbol is None or not 0 <= mode_index < symbol.mode_count:
             return "break"
         choices: list[tuple[str, bool, object] | None] = [
-            ("左移", mode_index > 0, lambda index=mode_index: self._shift_mode(index, -1)),
-            ("右移", mode_index < symbol.mode_count - 1, lambda index=mode_index: self._shift_mode(index, 1)),
-            ("删除", symbol.mode_count > 1, lambda index=mode_index: self._delete_mode_at(index)),
-            ("恢复", symbol.editor_iid in self._mode_baselines, self._restore_modes),
+            (self.t("move_left"), mode_index > 0, lambda index=mode_index: self._shift_mode(index, -1)),
+            (self.t("move_right"), mode_index < symbol.mode_count - 1, lambda index=mode_index: self._shift_mode(index, 1)),
+            (self.t("delete"), symbol.mode_count > 1, lambda index=mode_index: self._delete_mode_at(index)),
+            None,
+            (self.t("custom_mode_name"), True, lambda index=mode_index: self._ask_mode_name(index)),
+            (
+                self.t("reset_mode_name"),
+                symbol.has_custom_mode_name(mode_index),
+                lambda index=mode_index: self._reset_mode_name(index),
+            ),
+            None,
+            (self.t("restore"), symbol.editor_iid in self._mode_baselines, self._restore_modes),
         ]
         self._schedule_choice_popup(event.x_root, event.y_root, choices)
         return "break"
@@ -730,15 +792,15 @@ class EditorApp(tk.Tk):
             for name in names:
                 choices.append(
                     (
-                        name if name else "（空名称）",
+                        name if name else self.t("empty_name"),
                         True,
                         lambda chosen=name, group=list(pins): self._apply_pin_name(group, chosen),
                     )
                 )
         else:
-            choices.append(("（没有已有名称）", False, None))
+            choices.append((self.t("no_existing_name"), False, None))
         choices.append(None)
-        choices.append(("自定义名称…", True, lambda group=list(pins): self._ask_pin_name(group)))
+        choices.append((self.t("custom_name"), True, lambda group=list(pins): self._ask_pin_name(group)))
         self._schedule_choice_popup(event.x_root, event.y_root, choices)
         return "break"
 
@@ -823,12 +885,47 @@ class EditorApp(tk.Tk):
             pass
 
     def _ask_pin_name(self, pins: list[PinInfo]) -> None:
-        name = self._ask_text("自定义名称", "新的引脚名称。将应用到这个位号的全部显示模式。")
+        name = self._ask_text(self.t("custom_name_title"), self.t("custom_name_prompt"))
         if name is None:
             return
         self._apply_pin_name(pins, name)
 
-    def _ask_text(self, title: str, prompt: str) -> str | None:
+    def _ask_mode_name(self, index: int) -> None:
+        symbol = self._selected_symbol()
+        if symbol is None or not 0 <= index < symbol.mode_count:
+            return
+        name = self._ask_text(
+            self.t("custom_mode_name"),
+            self.t("custom_mode_prompt"),
+            initial=symbol.mode_name(index),
+        )
+        if name is None:
+            return
+        self._rename_mode(index, name, "mode_renamed")
+
+    def _reset_mode_name(self, index: int) -> None:
+        self._rename_mode(index, None, "mode_name_reset")
+
+    def _rename_mode(self, index: int, name: str | None, status_key: str) -> None:
+        symbol = self._selected_symbol()
+        if symbol is None or not 0 <= index < symbol.mode_count:
+            return
+        created = self._remember_mode_baseline(symbol)
+        try:
+            changed = symbol.set_mode_name(index, name)
+        except SchlibFormatError as exc:
+            if created:
+                self._mode_baselines.pop(symbol.editor_iid, None)
+            messagebox.showerror(self.t("cannot_edit"), localize_error(self.lang, str(exc)), parent=self)
+            return
+        if not changed:
+            if created:
+                self._mode_baselines.pop(symbol.editor_iid, None)
+            self._set_status_key("no_change")
+            return
+        self._finish_mode_edit(symbol, status_key, name=symbol.mode_name(index))
+
+    def _ask_text(self, title: str, prompt: str, initial: str = "") -> str | None:
         dialog = tk.Toplevel(self)
         dialog.title(title)
         dialog.transient(self)
@@ -837,7 +934,7 @@ class EditorApp(tk.Tk):
         frame = tk.Frame(dialog, padx=18, pady=16)
         frame.pack(fill="both", expand=True)
         tk.Label(frame, text=prompt, font=font, justify="left", wraplength=460).pack(anchor="w")
-        value = tk.StringVar()
+        value = tk.StringVar(value=initial)
         entry = tk.Entry(frame, textvariable=value, font=font, width=32)
         entry.pack(fill="x", pady=(12, 16), ipady=4)
         result: dict[str, str | None] = {"value": None}
@@ -851,8 +948,8 @@ class EditorApp(tk.Tk):
 
         buttons = tk.Frame(frame)
         buttons.pack(anchor="e")
-        tk.Button(buttons, text="确定", font=font, width=8, padx=8, pady=3, command=accept).pack(side="left", padx=(0, 8))
-        tk.Button(buttons, text="取消", font=font, width=8, padx=8, pady=3, command=cancel).pack(side="left")
+        tk.Button(buttons, text=self.t("ok"), font=font, width=8, padx=8, pady=3, command=accept).pack(side="left", padx=(0, 8))
+        tk.Button(buttons, text=self.t("cancel"), font=font, width=8, padx=8, pady=3, command=cancel).pack(side="left")
         dialog.bind("<Return>", accept)
         dialog.bind("<Escape>", cancel)
         dialog.protocol("WM_DELETE_WINDOW", cancel)
@@ -860,6 +957,8 @@ class EditorApp(tk.Tk):
         dialog.geometry(f"+{self.winfo_rootx() + 80}+{self.winfo_rooty() + 120}")
         dialog.grab_set()
         entry.focus_set()
+        entry.select_range(0, "end")
+        entry.icursor("end")
         self.wait_window(dialog)
         return result["value"]
 
@@ -879,21 +978,21 @@ class EditorApp(tk.Tk):
                         seen_notes.add(note)
                         notes.append(note)
         except SchlibFormatError as exc:
-            messagebox.showerror("不能修改", str(exc), parent=self)
+            messagebox.showerror(self.t("cannot_edit"), localize_error(self.lang, str(exc)), parent=self)
             return
         if updated == 0:
-            self._set_status(notes[0] if notes else "没有修改")
+            self._set_status_key("no_change")
             return
-        notes = [note for note in notes if note != "位号和名称没有变化"]
+        notes = [note for note in notes if note != self.t("unchanged_note")]
         keep = pins[0].designator
         self._recheck()
         self._refresh_symbol_row(symbol)
         self._update_summary()
         self._fill_pins(symbol, keep=keep)
         self._redraw(symbol)
-        self._set_status(f"已修改 {updated} 个引脚，尚未写入文件")
+        self._set_status_key("pins_updated", count=updated)
         if notes:
-            messagebox.showwarning("引脚已修改", "\n".join(notes), parent=self)
+            messagebox.showwarning(self.t("pins_changed"), "\n".join(localize_note(self.lang, note) for note in notes), parent=self)
 
     def _remember_mode_baseline(self, symbol: Symbol) -> bool:
         iid = getattr(symbol, "editor_iid", "")
@@ -911,16 +1010,17 @@ class EditorApp(tk.Tk):
             return
         order = list(range(symbol.mode_count))
         order[index], order[target] = order[target], order[index]
+        moved_name = symbol.mode_name(index)
         created = self._remember_mode_baseline(symbol)
         try:
             symbol.apply_order(order)
         except SchlibFormatError as exc:
             if created:
                 self._mode_baselines.pop(symbol.editor_iid, None)
-            messagebox.showerror("不能调整", str(exc), parent=self)
+            messagebox.showerror(self.t("cannot_reorder"), localize_error(self.lang, str(exc)), parent=self)
             return
-        direction = "左" if delta < 0 else "右"
-        self._finish_mode_edit(symbol, f"已将模式 {mode_letter(index)} 向{direction}移动，尚未写入文件")
+        direction = self.t("dir_left") if delta < 0 else self.t("dir_right")
+        self._finish_mode_edit(symbol, "moved", name=moved_name, direction=direction)
 
     def _delete_mode_at(self, index: int) -> None:
         symbol = self._selected_symbol()
@@ -929,13 +1029,12 @@ class EditorApp(tk.Tk):
         if not 0 <= index < symbol.mode_count:
             return
         if symbol.mode_count <= 1:
-            messagebox.showinfo("不能删除", "至少需要保留一个显示模式。", parent=self)
+            messagebox.showinfo(self.t("cannot_delete"), self.t("keep_one_mode"), parent=self)
             return
-        letter = mode_letter(index)
+        name = symbol.mode_name(index)
         agreed = messagebox.askyesno(
-            "删除显示模式",
-            f"删除模式 {letter}。这个符号的每个 Part 都会去掉该模式，后面的模式依次前移。\n"
-            "改动还在内存里，保存后才会写入文件。",
+            self.t("delete_mode_title"),
+            self.t("delete_mode_body", name=name),
             parent=self,
         )
         if not agreed:
@@ -946,12 +1045,10 @@ class EditorApp(tk.Tk):
         except SchlibFormatError as exc:
             if created:
                 self._mode_baselines.pop(symbol.editor_iid, None)
-            messagebox.showerror("不能删除", str(exc), parent=self)
+            messagebox.showerror(self.t("cannot_delete"), localize_error(self.lang, str(exc)), parent=self)
             return
-        status = f"已删除模式 {letter}，尚未写入文件"
-        if symbol.mode_count == 1:
-            status += "。这个符号现在只剩一个显示模式"
-        self._finish_mode_edit(symbol, status)
+        status_key = "deleted_mode_last" if symbol.mode_count == 1 else "deleted_mode"
+        self._finish_mode_edit(symbol, status_key, name=name)
 
     def _restore_modes(self) -> None:
         symbol = self._selected_symbol()
@@ -959,28 +1056,26 @@ class EditorApp(tk.Tk):
             return
         snapshot = self._mode_baselines.get(symbol.editor_iid)
         if snapshot is None:
-            self._set_status("没有需要恢复的显示模式调整")
+            self._set_status_key("nothing_to_restore")
             return
         agreed = messagebox.askyesno(
-            "恢复显示模式",
-            "恢复到开始调整显示模式之前。这之后对这个符号的修改会一起撤消。",
+            self.t("restore_title"),
+            self.t("restore_body"),
             parent=self,
         )
         if not agreed:
             return
         symbol._restore(snapshot)
         self._mode_baselines.pop(symbol.editor_iid, None)
-        status = "已恢复显示模式"
-        if symbol.dirty:
-            status += "，尚未写入文件"
-        self._finish_mode_edit(symbol, status)
+        status_key = "restored_dirty" if symbol.dirty else "restored"
+        self._finish_mode_edit(symbol, status_key)
 
-    def _finish_mode_edit(self, symbol: Symbol, status: str) -> None:
+    def _finish_mode_edit(self, symbol: Symbol, status_key: str, **kwargs: object) -> None:
         self._recheck()
         self._refresh_symbol_row(symbol)
         self._update_summary()
         self._show_symbol()
-        self._set_status(status)
+        self._set_status_key(status_key, **kwargs)
 
     def _fill_issue_view(self) -> None:
         self.issue_tree.delete(*self.issue_tree.get_children())
@@ -994,9 +1089,14 @@ class EditorApp(tk.Tk):
             symbol_name = symbol.name if symbol is not None else ""
             for issue in issues:
                 item = f"issue-{index}"
-                mode = "" if issue.mode is None else mode_letter(issue.mode)
+                mode = "" if issue.mode is None or symbol is None else symbol.mode_name(issue.mode)
                 self._issue_owner[item] = symbol_iid
-                self.issue_tree.insert("", "end", iid=item, values=(symbol_name, mode, issue.kind, issue.message))
+                self.issue_tree.insert(
+                    "",
+                    "end",
+                    iid=item,
+                    values=(symbol_name, mode, self.t(f"kind_{issue.kind}"), issue.message),
+                )
                 index += 1
 
     def _open_issue(self, _event=None) -> None:
@@ -1026,11 +1126,13 @@ class EditorApp(tk.Tk):
             list(range(symbol.mode_count)),
             highlight=highlight,
             label_as_target=False,
+            lang=self.lang,
         )
 
     def _draw(self, preview, symbol: Symbol | None, modes: list[int], **kwargs) -> None:
         if preview is None:
             return
+        kwargs.setdefault("lang", self.lang)
         preview.show(symbol, modes, **kwargs)
 
     def _update_summary(self) -> None:
@@ -1042,23 +1144,29 @@ class EditorApp(tk.Tk):
         total = len(self._all_symbols())
         bad = sum(1 for items in self.issues.values() if items)
         dirty = sum(1 for symbol in self._all_symbols() if symbol.dirty)
-        text = f"多显示模式符号 {total} 个，有问题 {bad} 个"
+        parts = [self.t("summary", total=total, bad=bad)]
         if len(self.libraries) > 1:
-            text += f"，来自 {len(self.libraries)} 个库"
+            parts.append(self.t("summary_libs", count=len(self.libraries)))
         if dirty:
-            text += f"，未保存 {dirty} 个"
+            parts.append(self.t("summary_dirty", count=dirty))
+        text = self.t("footer_sep").join(parts)
         self.summary_var.set(text)
         self.title(APP_TITLE + (" *" if dirty else ""))
         self._refresh_footer()
 
-    def _set_status(self, text: str) -> None:
-        self._status_text = text
+    def _set_status_key(self, key: str, **kwargs: object) -> None:
+        self._status_spec = (key, kwargs)
+        self._retranslate_status()
+
+    def _retranslate_status(self) -> None:
+        key, kwargs = self._status_spec
+        self._status_text = self.t(key, **kwargs)
         self._refresh_footer()
 
     def _refresh_footer(self) -> None:
         summary = self.summary_var.get()
         if self._status_text and summary:
-            self.status_var.set(f"{self._status_text}，{summary}")
+            self.status_var.set(self._status_text + self.t("footer_sep") + summary)
         else:
             self.status_var.set(self._status_text or summary)
 

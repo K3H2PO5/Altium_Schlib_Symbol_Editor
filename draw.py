@@ -39,13 +39,20 @@ except ImportError:  # pragma: no cover - 没装绘图库时只是不能预览
     NavigationToolbar2Tk = None
     HAS_MATPLOTLIB = False
 
-from records import Graphic, PinInfo, Symbol, mode_letter
+from i18n import tr
+from records import Graphic, PinInfo, Symbol
 
 _BODY = "#3584e4"
 _PIN = "#c01c28"
 _HIGHLIGHT = "#e5a50a"
 _TITLE_ABOVE = 10.0
 _TITLE_BELOW = 30.0
+# 名称锚点从外框往符号里面退这么多 mil，避免贴着边线。
+_NAME_INSET = 50.0
+# 文字高度按 mil 固定，放大缩小时和图形用同一个比例。
+_SYMBOL_TEXT_MIL = 100.0
+_PIN_NAME_MIL = 85.0
+_TITLE_TEXT_MIL = 114.0
 
 
 class _ModeColumn:
@@ -68,15 +75,16 @@ def render_symbol(
     *,
     highlight: tuple[int | None, int | None, str] | None = None,
     label_as_target: bool = False,
+    lang: str = "zh",
 ) -> None:
     fig.clear()
     axis = fig.add_subplot(111)
     if not modes:
         axis.axis("off")
-        axis.text(0.5, 0.5, "没有显示模式", ha="center", va="center")
+        axis.text(0.5, 0.5, tr(lang, "no_modes"), ha="center", va="center")
         return
     columns = [
-        _column_layout(symbol, mode, position, label_as_target=label_as_target)
+        _column_layout(symbol, mode, position, label_as_target=label_as_target, lang=lang)
         for position, mode in enumerate(modes)
     ]
     _place_columns(columns)
@@ -95,18 +103,20 @@ def render_symbol(
     span_y = max(y1 - y0, 1.0)
     axis.set_xlim(x0 - span_x * 0.012, x1 + span_x * 0.012)
     axis.set_ylim(y0 - span_y * 0.02, y1 + span_y * 0.012)
+    _scale_symbol_text(axis)
+    _bind_text_scale(axis)
 
 
-def _column_layout(symbol: Symbol, mode: int, position: int, *, label_as_target: bool) -> _ModeColumn:
+def _column_layout(symbol: Symbol, mode: int, position: int, *, label_as_target: bool, lang: str = "zh") -> _ModeColumn:
     pins = [pin for pin in symbol.pins() if pin.mode == mode and not pin.broken]
     graphics = symbol.graphics(mode)
     parts = _parts_in_mode(symbol, mode, pins, graphics)
-    current = mode_letter(mode)
-    future = mode_letter(position)
+    current = symbol.mode_name(mode)
+    future = symbol.mode_name(position)
     if label_as_target and current != future:
-        title = f"模式 {future} ← {current}"
+        title = tr(lang, "mode_heading_arrow", future=future, current=current)
     else:
-        title = f"模式 {current}"
+        title = current
     boxes = {part: _part_box(part, graphics, pins) for part in parts}
     widths = [box[2] - box[0] for box in boxes.values()]
     heights = [box[3] - box[1] for box in boxes.values()]
@@ -123,7 +133,7 @@ def _column_layout(symbol: Symbol, mode: int, position: int, *, label_as_target:
         cursor -= part_gap
     width = max(widths) if widths else max(180.0, typical_w)
     if not parts:
-        labels.append((0.0, cursor, "没有图形和引脚"))
+        labels.append((0.0, cursor, tr(lang, "no_graphics")))
     column = _ModeColumn(mode, title, width, pins, graphics, offsets, labels)
     column.title_gap = _TITLE_ABOVE
     return column
@@ -152,11 +162,12 @@ def _place_columns(columns: list[_ModeColumn]) -> None:
 
 def _draw_column(axis, column: _ModeColumn, highlight) -> None:
     title_x = column.origin_x + column.width / 2
-    axis.text(
+    _mil_text(
+        axis,
         title_x,
         0.0,
         column.title,
-        fontsize=9,
+        _TITLE_TEXT_MIL,
         ha="center",
         va="bottom",
         color="#1a1a1a",
@@ -176,7 +187,17 @@ def _draw_column(axis, column: _ModeColumn, highlight) -> None:
         )
         _draw_pin(axis, pin, column.origin_x + dx, dy, selected)
     for x, y, text in column.labels:
-        axis.text(column.origin_x + x, y, text, fontsize=8, color="#666666", ha="left", va="top", clip_on=False)
+        _mil_text(
+            axis,
+            column.origin_x + x,
+            y,
+            text,
+            _SYMBOL_TEXT_MIL,
+            color="#666666",
+            ha="left",
+            va="top",
+            clip_on=False,
+        )
         axis.plot(column.origin_x + x, y, markersize=0)
 
 
@@ -293,7 +314,7 @@ def _draw_graphic(axis, graphic: Graphic, dx: float, dy: float) -> None:
         )
         return
     if graphic.kind == "text" and graphic.text:
-        axis.text(x, y, graphic.text, color=_BODY, fontsize=8, ha="center", va="center")
+        _mil_text(axis, x, y, graphic.text, _SYMBOL_TEXT_MIL, color=_BODY, ha="center", va="center")
         axis.plot(x, y, markersize=0)
 
 
@@ -310,11 +331,20 @@ def _draw_pin(axis, pin: PinInfo, dx: float, dy: float, selected: bool) -> None:
         perp_x, perp_y = _perp(end_x - body_x, end_y - body_y)
         text_x = (body_x + end_x) / 2 + perp_x * 36
         text_y = (body_y + end_y) / 2 + perp_y * 36
-        axis.text(text_x, text_y, pin.designator, fontsize=8, color="#222222", ha="center", va="center")
+        _mil_text(axis, text_x, text_y, pin.designator, _SYMBOL_TEXT_MIL, color="#222222", ha="center", va="center")
         axis.plot(text_x, text_y, markersize=0)
     if pin.name:
         name_x, name_y, ha, va = _name_layout(body_x, body_y, end_x, end_y)
-        axis.text(name_x, name_y, pin.name, fontsize=8, color=_HIGHLIGHT if selected else _BODY, ha=ha, va=va)
+        _mil_text(
+            axis,
+            name_x,
+            name_y,
+            pin.name,
+            _PIN_NAME_MIL,
+            color=_HIGHLIGHT if selected else _BODY,
+            ha=ha,
+            va=va,
+        )
         axis.plot(name_x, name_y, markersize=0)
 
 
@@ -344,14 +374,15 @@ def _perp(delta_x: float, delta_y: float) -> tuple[float, float]:
 
 
 def _name_layout(body_x: float, body_y: float, end_x: float, end_y: float):
+    """引脚名称放在外框内侧，和边线留出固定空隙。空隙不随引脚长短变化。"""
+
     delta_x, delta_y = end_x - body_x, end_y - body_y
     length = (delta_x * delta_x + delta_y * delta_y) ** 0.5
     if length < 1e-9:
         return body_x, body_y, "center", "center"
     toward_x, toward_y = -delta_x / length, -delta_y / length
-    mid_x, mid_y = (body_x + end_x) / 2, (body_y + end_y) / 2
-    name_x = mid_x + toward_x * 90
-    name_y = mid_y + toward_y * 90
+    name_x = body_x + toward_x * _NAME_INSET
+    name_y = body_y + toward_y * _NAME_INSET
     if toward_x < -0.2:
         align = ("right", "center")
     elif toward_x > 0.2:
@@ -363,6 +394,42 @@ def _name_layout(body_x: float, body_y: float, end_x: float, end_y: float):
     else:
         align = ("center", "center")
     return name_x, name_y, align[0], align[1]
+
+
+def _mil_text(axis, x: float, y: float, text: str, size_mil: float, **kwargs):
+    artist = axis.text(x, y, text, fontsize=8, **kwargs)
+    artist._size_mil = size_mil
+    return artist
+
+
+def _scale_symbol_text(axis) -> None:
+    """按当前视图的 mil→像素比例重设文字字号，使文字和图形一起缩放。"""
+
+    figure = axis.figure
+    if figure is None:
+        return
+    try:
+        origin = axis.transData.transform((0.0, 0.0))
+        unit = axis.transData.transform((0.0, 100.0))
+    except (ValueError, RuntimeError):
+        return
+    pixels_per_mil = abs(unit[1] - origin[1]) / 100.0
+    if pixels_per_mil < 1e-9:
+        return
+    dpi = float(figure.dpi or 100.0)
+    for artist in axis.texts:
+        size_mil = getattr(artist, "_size_mil", None)
+        if not size_mil:
+            continue
+        artist.set_fontsize(max(1.0, size_mil * pixels_per_mil * 72.0 / dpi))
+
+
+def _bind_text_scale(axis) -> None:
+    def on_limit_change(changed) -> None:
+        _scale_symbol_text(changed)
+
+    axis.callbacks.connect("xlim_changed", on_limit_change)
+    axis.callbacks.connect("ylim_changed", on_limit_change)
 
 
 if HAS_MATPLOTLIB:
@@ -428,6 +495,7 @@ if HAS_MATPLOTLIB:
             self._paint()
             if span is not None:
                 self._apply_margins()
+            self._scale_drawn_text()
             self.mpl.draw()
             widget = self.mpl.get_tk_widget()
             widget.configure(
@@ -441,7 +509,7 @@ if HAS_MATPLOTLIB:
                 self.fig.clear()
                 axis = self.fig.add_subplot(111)
                 axis.axis("off")
-                axis.text(0.5, 0.5, "选择左侧的符号", ha="center", va="center")
+                axis.text(0.5, 0.5, tr(self._kwargs.get("lang", "zh"), "select_symbol"), ha="center", va="center")
                 return
             try:
                 render_symbol(self.fig, self._symbol, self._modes, **self._kwargs)
@@ -449,7 +517,7 @@ if HAS_MATPLOTLIB:
                 self.fig.clear()
                 axis = self.fig.add_subplot(111)
                 axis.axis("off")
-                axis.text(0.5, 0.5, f"无法绘制：{exc}", ha="center", va="center", wrap=True)
+                axis.text(0.5, 0.5, tr(self._kwargs.get("lang", "zh"), "cannot_draw", error=exc), ha="center", va="center", wrap=True)
 
         def _content_span(self) -> tuple[float, float] | None:
             if not self.fig.axes:
@@ -487,6 +555,10 @@ if HAS_MATPLOTLIB:
             width = self._MARGIN_LEFT + self._MARGIN_RIGHT + data_w * scale / dpi
             height = self._MARGIN_TOP + self._MARGIN_BOTTOM + data_h * scale / dpi
             return width, height
+
+        def _scale_drawn_text(self) -> None:
+            if self.fig.axes:
+                _scale_symbol_text(self.fig.axes[0])
 
         def _apply_margins(self) -> None:
             width = self.fig.get_figwidth()

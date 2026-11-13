@@ -8,6 +8,7 @@ Altium 不能直接交换两个模式，只能把一个模式复制到末尾，�
 from __future__ import annotations
 
 import random
+import re
 import string
 import struct
 from collections import deque
@@ -79,7 +80,7 @@ class EditResult:
 
 
 def mode_letter(index: int) -> str:
-    """0→A，1→B，26→AA。和界面里说的模式 A/B/C 一致。"""
+    """0→A，1→B，26→AA。只用于内部说明，界面显示用 mode_name。"""
 
     number = index + 1
     chars: list[str] = []
@@ -87,6 +88,52 @@ def mode_letter(index: int) -> str:
         number, remainder = divmod(number - 1, 26)
         chars.append(chr(ord("A") + remainder))
     return "".join(reversed(chars))
+
+
+_CUSTOM_MODE_NAME = re.compile(br"\|CustomDisplayModeName(\d+)=([^|\x00]*)")
+
+
+def default_mode_name(index: int) -> str:
+    """Altium 没写自定义名称时的显示名。0 是 Normal，之后是 Alternate 1、Alternate 2。"""
+
+    if index <= 0:
+        return "Normal"
+    return f"Alternate {index}"
+
+
+def read_custom_mode_names(payload: bytes) -> dict[int, bytes]:
+    """元件头里写过的 CustomDisplayModeNameN。没改过名字的模式不会出现。"""
+
+    return {int(match.group(1)): match.group(2) for match in _CUSTOM_MODE_NAME.finditer(payload)}
+
+
+def write_custom_mode_names(payload: bytes, names: dict[int, bytes]) -> bytes:
+    cleaned = _CUSTOM_MODE_NAME.sub(b"", payload)
+    addition = b"".join(
+        b"|CustomDisplayModeName" + str(index).encode("ascii") + b"=" + names[index]
+        for index in sorted(names)
+        if names[index]
+    )
+    if not addition:
+        return cleaned
+    nul = cleaned.find(b"\x00")
+    if nul < 0:
+        return cleaned + addition
+    return cleaned[:nul] + addition + cleaned[nul:]
+
+
+def encode_mode_name(text: str) -> bytes:
+    try:
+        return text.encode("ascii")
+    except UnicodeEncodeError:
+        return text.encode("utf-8")
+
+
+def decode_mode_name(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin1")
 
 
 def iter_stream(data: bytes):
@@ -905,6 +952,49 @@ class Symbol:
         count = max(declared, observed)
         return count if count >= 1 else 1
 
+    def mode_name(self, index: int) -> str:
+        """优先用文件里的 CustomDisplayModeName，否则用 Normal / Alternate N。"""
+
+        raw = self._custom_name_bytes(index)
+        if raw:
+            text = decode_mode_name(raw).strip()
+            if text:
+                return text
+        return default_mode_name(index)
+
+    def has_custom_mode_name(self, index: int) -> bool:
+        return self._custom_name_bytes(index) is not None
+
+    def set_mode_name(self, index: int, name: str | None) -> bool:
+        """写入自定义名称。name 为 None 时删掉自定义名称，恢复成默认名。"""
+
+        if not 0 <= index < self.mode_count:
+            raise SchlibFormatError(f"没有显示模式 {index}")
+        header = self._header()
+        if header is None:
+            raise SchlibFormatError("找不到元件头，不能修改模式名称")
+        names = read_custom_mode_names(header.payload)
+        if name is None:
+            if index not in names:
+                return False
+            del names[index]
+        else:
+            cleaned = _validate_pin_text("名称", name, allow_empty=False)
+            if "|" in cleaned:
+                raise SchlibFormatError("名称不能包含 |")
+            encoded = encode_mode_name(cleaned)
+            if names.get(index) == encoded:
+                return False
+            names[index] = encoded
+        header.payload = write_custom_mode_names(header.payload, names)
+        return True
+
+    def _custom_name_bytes(self, index: int) -> bytes | None:
+        header = self._header()
+        if header is None:
+            return None
+        return read_custom_mode_names(header.payload).get(index)
+
     def _set_mode_count(self, count: int) -> None:
         self.mode_count = count
         header = self._header()
@@ -1027,12 +1117,12 @@ class Symbol:
                 if pin.ordinal < len(group):
                     chosen = group[pin.ordinal]
                     if chosen.broken:
-                        notes.append(f"模式 {mode_letter(mode)} 的对应引脚无法解析，已跳过")
+                        notes.append(f"模式 {self.mode_name(mode)} 的对应引脚无法解析，已跳过")
                         continue
                     targets.append(chosen)
                 else:
                     notes.append(
-                        f"模式 {mode_letter(mode)} 没有对应的第 {pin.ordinal + 1} 个位号 {pin.designator}"
+                        f"模式 {self.mode_name(mode)} 没有对应的第 {pin.ordinal + 1} 个位号 {pin.designator}"
                     )
             if not targets:
                 raise SchlibFormatError("没有可修改的引脚")
@@ -1051,7 +1141,7 @@ class Symbol:
                     and other.designator == designator
                 ):
                     notes.append(
-                        f"模式 {mode_letter(item.mode)} Part {item.part_id} 已经有位号 {designator}"
+                        f"模式 {self.mode_name(item.mode)} Part {item.part_id} 已经有位号 {designator}"
                     )
                     break
         for item in targets:
@@ -1082,11 +1172,16 @@ class Symbol:
         if not moves:
             return []
         self._ensure_pintext()
+        header = self._header()
+        saved_names = read_custom_mode_names(header.payload) if header is not None else {}
+        saved_selected = self._selected_display_mode()
         snapshot = self._capture()
         try:
             for index in moves:
                 self._copy_mode(index)
                 self._delete_mode(index)
+            self._place_custom_names(saved_names, order)
+            self._place_selected_mode(saved_selected, order)
             self._check_modes()
         except Exception:
             self._restore(snapshot)
@@ -1165,6 +1260,7 @@ class Symbol:
         self.records[insert_at:insert_at] = clones
         self._transform_pin_entries(lambda entries: copy_indexed_entries(entries, source_indices, pin_cursor))
         self._set_mode_count(new_mode + 1)
+        self._copy_custom_name(source, new_mode)
 
     def _delete_mode(self, index: int) -> None:
         if not 0 <= index < self.mode_count:
@@ -1200,6 +1296,67 @@ class Symbol:
         self.records = kept
         self._transform_pin_entries(lambda entries: remap_pin_entries(entries, mapping))
         self._set_mode_count(self.mode_count - 1)
+        self._shift_custom_names(index)
+
+    def _place_custom_names(self, saved: dict[int, bytes], order: list[int]) -> None:
+        header = self._header()
+        if header is None:
+            return
+        placed = {new: saved[old] for new, old in enumerate(order) if old in saved}
+        header.payload = write_custom_mode_names(header.payload, placed)
+
+    def _selected_display_mode(self) -> int | None:
+        header = self._header()
+        if header is None:
+            return None
+        current = get_field(header.payload, "DisplayMode")
+        if current is None:
+            return None
+        try:
+            return int(current)
+        except ValueError:
+            return None
+
+    def _place_selected_mode(self, selected: int | None, order: list[int]) -> None:
+        if selected is None or selected not in order:
+            return
+        header = self._header()
+        if header is None or get_field(header.payload, "DisplayMode") is None:
+            return
+        header.payload = set_field(header.payload, "DisplayMode", str(order.index(selected)))
+
+    def _copy_custom_name(self, source: int, dest: int) -> None:
+        header = self._header()
+        if header is None:
+            return
+        names = read_custom_mode_names(header.payload)
+        if source not in names:
+            return
+        names[dest] = names[source]
+        header.payload = write_custom_mode_names(header.payload, names)
+
+    def _shift_custom_names(self, deleted: int) -> None:
+        header = self._header()
+        if header is None:
+            return
+        names = {
+            (index - 1 if index > deleted else index): raw
+            for index, raw in read_custom_mode_names(header.payload).items()
+            if index != deleted
+        }
+        header.payload = write_custom_mode_names(header.payload, names)
+        current = get_field(header.payload, "DisplayMode")
+        if current is None:
+            return
+        try:
+            selected = int(current)
+        except ValueError:
+            return
+        if selected == deleted:
+            selected = min(deleted, max(self.mode_count - 1, 0))
+        elif selected > deleted:
+            selected -= 1
+        header.payload = set_field(header.payload, "DisplayMode", str(selected))
 
     def _transform_pin_entries(self, transform) -> None:
         if self.pintext_entries is not None:

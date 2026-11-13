@@ -11,7 +11,7 @@ Altium 自己管理这些显示模式却比较费劲：
 
 这个工具用来把这些隐患一次看清，并直接改掉。它只关心带多种显示模式的符号，在一个窗口里对照全部模式和全部 Part。
 
-Altium 里同一个符号的 Mode 菜单通常长这样。Normal、Alternate 1、Alternate 2 就是这里的模式 A、模式 B、模式 C。
+Altium 里同一个符号的 Mode 菜单通常长这样。程序里的模式名称与之一致：没改过名的显示为 Normal、Alternate 1、Alternate 2；在 Altium 里改过名的，显示文件中的自定义名称。界面可以在中文和 English 之间切换。
 
 ![Altium 原理图库中的显示模式菜单](docs/images/modify.png)
 
@@ -86,9 +86,10 @@ python build_exe.py
 
 在表格的模式标题上右键：
 
-- **左移**、**右移**：和相邻模式交换，点一下立即生效。最左边不能再左移，最右边不能再右移。
+- **左移**、**右移**：和相邻模式交换，点一下立即生效。自定义名称会跟着这个模式走。最左边不能再左移，最右边不能再右移。
 - **删除**：删掉这一列对应的显示模式。
-- **恢复**：回到这次开始调整显示模式之前。那之后对这个符号做过的引脚修改也会一并撤消。
+- **自定义名称**、**复位名称**：给这个模式写一个名称，或删掉自定义名称、回到 Normal / Alternate N。
+- **恢复**：回到这次开始调整显示模式之前。那之后对这个符号做过的顺序调整、模式改名和引脚修改会一并撤消。
 
 ![在模式标题上右键左移或右移](docs/images/modify_seque.png)
 
@@ -146,3 +147,155 @@ History\DB_IC_20261111_165930.SchLib
 ## 许可证
 
 本项目采用 [MIT License](LICENSE)。
+
+---
+
+# Altium SchLib Symbol Editor
+
+An Altium Designer schematic symbol can keep several display modes for the same part, so one component can be drawn in more than one way. An optocoupler can show the LED and the detector together or apart. A relay can show the coil and the contacts together or apart. A DPDT relay can also split the two contact sets into separate parts. Those are all reasonable library designs.
+
+Altium makes these modes awkward to maintain:
+
+- You have to open each component and then the Mode menu to see whether a second or third drawing exists.
+- The built-in rule check looks only at the mode currently selected. Wrong pins or stale graphics in the other modes stay hidden until you switch to them.
+- New parts are often copied from an old symbol, renamed, and edited. Display modes that were not updated or deleted stay in the library.
+- Reordering display modes is a manual copy-and-paste. A part with several sub-parts has to be done once per sub-part.
+
+This tool shows those problems in one window and lets you fix them. It lists only symbols that have more than one display mode, and it shows every mode and every sub-part together.
+
+Mode names match Altium. A mode that was never renamed is shown as Normal, Alternate 1, Alternate 2, and so on. A mode renamed in Altium is shown with the custom name stored in the file. The toolbar button switches the whole window between 中文 and English.
+
+![Display modes in an Altium schematic library](docs/images/modify.png)
+
+## Features
+
+1. **Check pin designators and names.** A row turns red when the same designator has different names across display modes. You can set them all to one name.
+2. **Reorder display modes.** Right-click a mode heading and move it left or right. No copy-and-paste.
+3. **Delete a display mode you do not need.** Modes are laid out left to right. Sub-parts of one mode are stacked top to bottom.
+4. **Flag duplicate pins and hidden pins that should not be hidden.** Only pins named `NC`, `nc`, or `.n.c` may be hidden. Those names live in `HIDDEN_PIN_NAMES` in `issues.py`.
+
+The check also compares pin counts, empty designators, and duplicate designators inside one mode. It does not split the check by sub-part.
+
+## Run
+
+Windows and Python 3.10 or newer.
+
+```bat
+python -m pip install -r requirements.txt
+python gui.py
+```
+
+Build a single program:
+
+```bat
+python build_exe.py
+```
+
+The build adds one to the last version digit and writes `release\Altium_Schlib_Symbol_Editor_v1.0.0.2.exe`, or whatever the current version is.
+
+Close Altium Designer before saving. The program needs exclusive access to the library. A save fails while Altium has the file open.
+
+## Open a library
+
+- **Open SchLib** opens one library and lists only symbols with more than one display mode.
+- **Open Folder** lists every `.SchLib` in that folder and does not enter subfolders. With more than one library, the list adds a file-name column.
+- **Filter** matches the symbol name or the file name.
+- **Only symbols with issues** hides symbols that passed the check.
+- **Close** asks whether to save when there are unsaved edits.
+
+The window title is `Altium_Schlib_Symbol_Editor` plus the version. A trailing `*` means something has not been written to disk. The status line shows how many symbols there are, how many have issues, and how many libraries are unsaved.
+
+The window opens on the **Edit** page. Symbols are on the left, pin names are in the middle, and every display mode is drawn on the right.
+
+![Symbol list and preview after opening a folder](docs/images/modify_pin_name_before.png)
+
+In the picture, `AMP_INA_3A_RG18` has 4 issues. Pin 2 is named `-IN` in one mode and `IN-` in another, so that row is red. Both modes are drawn side by side.
+
+## 1. Fix inconsistent pin names
+
+On the **Edit** page the table has the designator and one name column per display mode. Each designator is one row, not one row per sub-part. The row is red when a mode is missing that designator, or when one mode contains more than one name for it.
+
+Right-click a name:
+
+- Pick a name that already exists. An empty name is shown as “(empty)”.
+- Choose **Custom name…** and type a new name.
+
+The new name is applied to that designator in every display mode and every sub-part. The designator itself stays the same.
+
+![Right-click to pick an existing name or type a custom name](docs/images/modify_pin_name.png)
+
+After the edit the red row clears and the issue count drops. The drawing updates too. The change is still in memory. A `*` after the symbol name means it has not been written to the file.
+
+![Pin 2 now uses IN- in every mode](docs/images/modify_pin_name_after.png)
+
+The **Pin Check** page lists the full messages: pin count, pin name, duplicate pin, and hidden pin. **Current symbol only** is checked by default.
+
+## 2. Reorder display modes
+
+The preview places display modes from left to right. Sub-parts of one mode are stacked from top to bottom.
+
+![Three display modes and five sub-parts of AS_DG411](docs/images/modify_seque_before.png)
+
+Right-click a mode heading in the table:
+
+- **Move left** and **Move right** swap that mode with its neighbor immediately. A custom name moves with the mode. The first mode cannot move left, and the last mode cannot move right.
+- **Delete** removes that display mode.
+- **Custom Name** stores a name for this mode. **Reset Name** removes it, so the mode shows Normal or Alternate N again. Reset is unavailable when the mode has no custom name.
+- **Restore** returns the symbol to the moment before the first mode edit in this session. Later reorder, mode rename, and pin edits on that symbol are undone together. It is one snapshot, not a step-by-step undo.
+
+![Right-click a mode heading to move it](docs/images/modify_seque.png)
+
+The next picture is the former second mode after it moved left. Every sub-part moves with it.
+
+![Order after moving the second mode left](docs/images/modify_seque_after.png)
+
+## 3. Delete a display mode
+
+Check the preview before deleting. `AS_DG412` below still has three modes.
+
+![Three display modes before deletion](docs/images/delete_mode_before.png)
+
+Right-click the heading of the mode to remove, choose **Delete**, and confirm. The last remaining mode cannot be deleted. Later modes shift forward and keep their Altium names: the new first mode is Normal unless it has a custom name.
+
+![Confirm deletion of the current display mode](docs/images/delete_mode.png)
+
+The next picture is the symbol after the original first mode was removed. Two drawings remain, and the mode count goes from 3 to 2.
+
+![Two drawings remain after deleting the first mode](docs/images/delete_mode_after.png)
+
+After you save and open the library in Altium again, the Mode menu shows only the modes that remain.
+
+![Only Normal and Alternate 1 remain in Altium](docs/images/delete.png)
+
+## 4. Duplicate pins and hidden pins
+
+These issues are on the **Pin Check** page. Symbols with issues are marked in the list on the left, and the issue column shows the count.
+
+- **Duplicate pin**: the same designator appears more than once in one display mode.
+- **Hidden pin**: the pin is hidden and its name is not allowed. Only `NC`, `nc`, and `.n.c` are allowed. A hidden pin named `VLogic` is an error. `Nc` is an error too, because the match is case-sensitive.
+
+Change the allowed names in one place:
+
+```python
+HIDDEN_PIN_NAMES = ("NC", "nc", ".n.c")
+```
+
+## Save
+
+Click **Save** or press Ctrl+S after you have checked the result. The program lists the libraries and symbols it will write. Close Altium Designer first.
+
+![Confirm the libraries and symbols, and close Altium before saving](docs/images/save.png)
+
+The program creates a `History` folder next to the library and writes a backup stamped to the second, for example:
+
+```text
+History\DB_IC_20261111_165930.SchLib
+```
+
+A second save in the same second is named `DB_IC_20261111_165930_2.SchLib`, so the previous backup is kept. If the write fails, that backup is copied back over the original file. The edits in the window stay.
+
+After a successful save, the `*` on the symbol name disappears. **Restore** can still undo display-mode edits from this session until you close the library or open it again.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
