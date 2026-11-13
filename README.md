@@ -21,6 +21,7 @@ Altium 里同一个符号的 Mode 菜单通常长这样。程序里的模式名�
 2. **调整显示模式顺序。** 在模式标题上右键，左移或右移一下就完成，不用再复制粘贴。
 3. **删除不需要的显示模式。** 所有模式横向排开，同一个模式里的多个 Part 纵向排开。看清楚再删。
 4. **检查重复引脚和不该隐藏的引脚。** 目前只允许名称为 `NC`、`nc`、`.n.c` 的引脚设置为不可见。这三个名称写在 `issues.py` 的 `HIDDEN_PIN_NAMES` 里，以后要增减，只改这一处。
+5. **显示和修改模式名称。** 文件里有 `CustomDisplayModeName` 就显示这个名称，没有就显示 Normal、Alternate 1、Alternate 2。在模式标题上右键可以自定义名称或复位名称。左移、右移时，自定义名称跟着模式走。
 
 另外还会检查各模式的引脚数量是否一致、位号是否为空、同一模式里位号是否重复。检查不区分 Part，只按显示模式汇总。
 
@@ -128,6 +129,10 @@ python build_exe.py
 HIDDEN_PIN_NAMES = ("NC", "nc", ".n.c")
 ```
 
+## 绘图
+
+引脚名称画在外框内侧，和边线留出一段空隙，避免名称被外框盖住。文字高度按 mil 固定，框选放大、缩小或回到整图时，引脚名称、位号和模式标题会跟图形一起缩放。引脚名称的高度是 85 mil。
+
 ## 保存
 
 确认内容后再点 **保存**，或按 Ctrl+S。程序会列出将要写回的库和符号。请先关闭 Altium Designer。
@@ -173,6 +178,7 @@ Mode names match Altium. A mode that was never renamed is shown as Normal, Alter
 2. **Reorder display modes.** Right-click a mode heading and move it left or right. No copy-and-paste.
 3. **Delete a display mode you do not need.** Modes are laid out left to right. Sub-parts of one mode are stacked top to bottom.
 4. **Flag duplicate pins and hidden pins that should not be hidden.** Only pins named `NC`, `nc`, or `.n.c` may be hidden. Those names live in `HIDDEN_PIN_NAMES` in `issues.py`.
+5. **Show and edit mode names.** A mode with `CustomDisplayModeName` in the file uses that name. Otherwise it is shown as Normal, Alternate 1, Alternate 2, and so on. Right-click a mode heading to set a custom name or reset it. A custom name stays with the mode when you move it left or right.
 
 The check also compares pin counts, empty designators, and duplicate designators inside one mode. It does not split the check by sub-part.
 
@@ -279,6 +285,10 @@ Change the allowed names in one place:
 ```python
 HIDDEN_PIN_NAMES = ("NC", "nc", ".n.c")
 ```
+
+## Drawing
+
+Pin names are drawn inside the outline, with a gap so the border does not cover them. Text height is fixed in mils. Box-zoom, zoom out, and Home scale the pin names, designators, and mode titles together with the graphics. Pin names are 85 mil high.
 
 ## Save
 
