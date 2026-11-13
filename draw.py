@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 try:
     import matplotlib
     from matplotlib import patches
@@ -73,7 +75,7 @@ def render_symbol(
     symbol: Symbol,
     modes: list[int],
     *,
-    highlight: tuple[int | None, int | None, str] | None = None,
+    highlight: tuple | None = None,
     label_as_target: bool = False,
     lang: str = "zh",
 ) -> None:
@@ -179,12 +181,7 @@ def _draw_column(axis, column: _ModeColumn, highlight) -> None:
         _draw_graphic(axis, graphic, column.origin_x + dx, dy)
     for pin in column.pins:
         dx, dy = column.offsets.get(pin.part_id, (0.0, 0.0))
-        selected = (
-            highlight is not None
-            and highlight[2] == pin.designator
-            and (highlight[1] is None or highlight[1] == pin.part_id)
-            and (highlight[0] is None or highlight[0] == column.mode)
-        )
+        selected = _pin_highlighted(highlight, pin, column.mode)
         _draw_pin(axis, pin, column.origin_x + dx, dy, selected)
     for x, y, text in column.labels:
         _mil_text(
@@ -199,6 +196,58 @@ def _draw_column(axis, column: _ModeColumn, highlight) -> None:
             clip_on=False,
         )
         axis.plot(column.origin_x + x, y, markersize=0)
+
+
+def _pin_highlighted(highlight, pin: PinInfo, mode: int) -> bool:
+    if not highlight or len(highlight) < 3:
+        return False
+    record = highlight[3] if len(highlight) > 3 else None
+    if record is not None:
+        return pin.record_index == record
+    return (
+        highlight[2] == pin.designator
+        and (highlight[1] is None or highlight[1] == pin.part_id)
+        and (highlight[0] is None or highlight[0] == mode)
+    )
+
+
+def pin_at(symbol: Symbol, modes: list[int], x: float, y: float, *, tolerance: float = 100.0) -> PinInfo | None:
+    """返回离数据坐标最近、且在容差内的引脚。点在引脚线段或位号文字上都算命中。"""
+    columns = [
+        _column_layout(symbol, mode, position, label_as_target=False)
+        for position, mode in enumerate(modes)
+    ]
+    _place_columns(columns)
+    best: PinInfo | None = None
+    best_distance = tolerance
+    for column in columns:
+        for pin in column.pins:
+            dx, dy = column.offsets.get(pin.part_id, (0.0, 0.0))
+            body_x = pin.x + column.origin_x + dx
+            body_y = pin.y + dy
+            end_x, end_y = _pin_end(pin)
+            end_x += column.origin_x + dx
+            end_y += dy
+            distance = _distance_to_segment(x, y, body_x, body_y, end_x, end_y)
+            if pin.designator:
+                perp_x, perp_y = _perp(end_x - body_x, end_y - body_y)
+                text_x = (body_x + end_x) / 2 + perp_x * 36
+                text_y = (body_y + end_y) / 2 + perp_y * 36
+                distance = min(distance, math.hypot(x - text_x, y - text_y))
+            if distance < best_distance:
+                best = pin
+                best_distance = distance
+    return best
+
+
+def _distance_to_segment(px: float, py: float, x0: float, y0: float, x1: float, y1: float) -> float:
+    dx = x1 - x0
+    dy = y1 - y0
+    length_sq = dx * dx + dy * dy
+    if length_sq < 1e-9:
+        return math.hypot(px - x0, py - y0)
+    ratio = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / length_sq))
+    return math.hypot(px - (x0 + ratio * dx), py - (y0 + ratio * dy))
 
 
 def _median(values: list[float]) -> float:
@@ -479,6 +528,29 @@ if HAS_MATPLOTLIB:
             self.inner.bind("<Configure>", self._fit)
             self.canvas.bind("<Configure>", self._on_canvas_configure)
             self.canvas.bind("<MouseWheel>", self._wheel)
+            self._pin_handler = None
+            self.mpl.mpl_connect("button_press_event", self._on_pick)
+
+        def set_pin_handler(self, handler) -> None:
+            self._pin_handler = handler
+
+        def _on_pick(self, event) -> None:
+            if self._pin_handler is None or event.xdata is None or event.ydata is None:
+                return
+            if event.button not in (1, 3):
+                return
+            if event.button == 1 and getattr(self.toolbar, "mode", ""):
+                return
+            pin = None
+            if self._symbol is not None and self._modes:
+                pin = pin_at(self._symbol, self._modes, event.xdata, event.ydata)
+            gui = getattr(event, "guiEvent", None)
+            self._pin_handler(
+                pin,
+                event.button,
+                getattr(gui, "x_root", None),
+                getattr(gui, "y_root", None),
+            )
 
         def show(self, symbol: Symbol | None, modes: list[int], **kwargs) -> None:
             self._shown = True

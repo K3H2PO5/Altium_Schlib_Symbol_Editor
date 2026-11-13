@@ -1,7 +1,8 @@
-"""多显示模式符号的引脚一致性检查。"""
+"""引脚一致性、重复位号和位号是否连续。一种显示模式也检查重复和连续性。"""
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 
@@ -12,6 +13,9 @@ KIND_COUNT = "引脚数量"
 KIND_NAME = "引脚名称"
 KIND_DUP = "重复引脚"
 KIND_HIDDEN = "隐藏引脚"
+KIND_GAP = "引脚不连续"
+_BGA_DESIGNATOR = re.compile(r"^([A-Za-z]+)(\d+)$")
+_MISSING_LIMIT = 16
 # 允许设为不可见的引脚名称。后续增减只改这里。
 HIDDEN_PIN_NAMES = ("NC", "nc", ".n.c")
 
@@ -25,7 +29,7 @@ class PinIssue:
     message: str
 
 
-def check_symbol(symbol: Symbol, lang: str = "zh") -> list[PinIssue]:
+def check_symbol(symbol: Symbol, lang: str = "zh", *, check_gaps: bool = True) -> list[PinIssue]:
     """按显示模式检查引脚数量、名称、重复位号，以及隐藏引脚的名称。"""
 
     pins = [pin for pin in symbol.pins() if not pin.broken]
@@ -35,7 +39,24 @@ def check_symbol(symbol: Symbol, lang: str = "zh") -> list[PinIssue]:
     issues.extend(_empty_and_duplicates(symbol.name, modes, pins, lang, names))
     issues.extend(_compare_modes(symbol.name, modes, pins, lang, names))
     issues.extend(_hidden_names(symbol.name, pins, lang, names))
+    issues.extend(pin_audit_issues(symbol, lang, check_gaps=check_gaps))
     return issues
+
+
+def pin_audit_issues(symbol: Symbol, lang: str = "zh", *, check_gaps: bool = True) -> list[PinIssue]:
+    """重复位号，以及数字位号或 BGA 位号（A1、Z10、AA23）是否连续。"""
+
+    pins = [pin for pin in symbol.pins() if not pin.broken]
+    modes = list(range(symbol.mode_count))
+    names = {index: symbol.mode_name(index) for index in modes}
+    issues = _duplicates_only(symbol.name, modes, pins, lang, names)
+    if check_gaps:
+        issues.extend(_continuity(symbol.name, modes, pins, lang, names))
+    return issues
+
+
+def has_pin_audit_issue(symbol: Symbol) -> bool:
+    return bool(pin_audit_issues(symbol))
 
 
 def pin_row_note(pins: list[PinInfo], mode_count: int, pin: PinInfo, lang: str = "zh") -> str:
@@ -67,6 +88,125 @@ def _mode_label(mode: int, names: dict[int, str]) -> str:
     return names.get(mode) or default_mode_name(mode)
 
 
+def _duplicates_only(
+    symbol: str,
+    modes: list[int],
+    pins: list[PinInfo],
+    lang: str,
+    names: dict[int, str],
+) -> list[PinIssue]:
+    issues: list[PinIssue] = []
+    for mode in modes:
+        in_mode = [pin for pin in pins if pin.mode == mode]
+        counts = Counter(pin.designator for pin in in_mode if pin.designator != "")
+        for designator, count in sorted(counts.items(), key=lambda item: item[0]):
+            if count > 1:
+                issues.append(
+                    PinIssue(
+                        symbol=symbol,
+                        part_id=None,
+                        mode=mode,
+                        kind=KIND_DUP,
+                        message=tr(
+                            lang,
+                            "duplicate_designator",
+                            name=_mode_label(mode, names),
+                            designator=designator,
+                            count=count,
+                        ),
+                    )
+                )
+    return issues
+
+
+def _continuity(
+    symbol: str,
+    modes: list[int],
+    pins: list[PinInfo],
+    lang: str,
+    names: dict[int, str],
+) -> list[PinIssue]:
+    issues: list[PinIssue] = []
+    for mode in modes:
+        designators = {pin.designator for pin in pins if pin.mode == mode and pin.designator != ""}
+        missing = missing_designators(designators)
+        if not missing:
+            continue
+        shown = missing[:_MISSING_LIMIT]
+        detail = tr(lang, "list_sep").join(shown)
+        extra = len(missing) - len(shown)
+        if extra:
+            detail += tr(lang, "more_missing", count=extra)
+        issues.append(
+            PinIssue(
+                symbol=symbol,
+                part_id=None,
+                mode=mode,
+                kind=KIND_GAP,
+                message=tr(lang, "discontinuous", name=_mode_label(mode, names), missing=detail),
+            )
+        )
+    return issues
+
+
+def missing_designators(designators: set[str]) -> list[str]:
+    """数字位号补 min..max 的空洞。BGA 位号按 A..Z..AA 和球号补齐矩形里的空洞。"""
+
+    numbers: set[int] = set()
+    balls: set[tuple[int, int]] = set()
+    for text in designators:
+        if text.isdigit():
+            numbers.add(int(text))
+            continue
+        match = _BGA_DESIGNATOR.fullmatch(text.strip())
+        if match is None:
+            continue
+        row = _letter_index(match.group(1))
+        column = int(match.group(2))
+        if row > 0 and column > 0:
+            balls.add((row, column))
+    missing = [str(number) for number in range(min(numbers), max(numbers) + 1) if number not in numbers] if len(numbers) >= 2 else []
+    missing.extend(_missing_bga(balls))
+    return missing
+
+
+def _missing_bga(balls: set[tuple[int, int]]) -> list[str]:
+    if len(balls) < 2:
+        return []
+    rows = {row for row, _column in balls}
+    columns = {column for _row, column in balls}
+    present: dict[int, set[int]] = {}
+    for row, column in balls:
+        present.setdefault(row, set()).add(column)
+    missing: list[str] = []
+    for row in range(min(rows), max(rows) + 1):
+        got = present.get(row, set())
+        for column in range(min(columns), max(columns) + 1):
+            if column not in got:
+                missing.append(f"{_index_letter(row)}{column}")
+    return missing
+
+
+def _letter_index(text: str) -> int:
+    """A→1，Z→26，AA→27。和表格列号一样。"""
+
+    value = 0
+    for char in text.upper():
+        if not ("A" <= char <= "Z"):
+            return 0
+        value = value * 26 + (ord(char) - ord("A") + 1)
+    return value
+
+
+def _index_letter(index: int) -> str:
+    chars: list[str] = []
+    number = index
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        chars.append(chr(ord("A") + remainder))
+    return "".join(reversed(chars))
+
+
 def _empty_and_duplicates(
     symbol: str,
     modes: list[int],
@@ -88,18 +228,6 @@ def _empty_and_duplicates(
                     message=tr(lang, "empty_designators", name=_mode_label(mode, names), count=empty),
                 )
             )
-        counts = Counter(pin.designator for pin in in_mode if pin.designator != "")
-        for designator, count in sorted(counts.items(), key=lambda item: item[0]):
-            if count > 1:
-                issues.append(
-                    PinIssue(
-                        symbol=symbol,
-                        part_id=None,
-                        mode=mode,
-                        kind=KIND_DUP,
-                        message=tr(lang, "duplicate_designator", name=_mode_label(mode, names), designator=designator, count=count),
-                    )
-                )
     return issues
 
 

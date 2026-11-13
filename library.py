@@ -12,6 +12,7 @@ from pathlib import Path
 import olefile
 
 from ole_storage import OleCompoundFile
+from issues import has_pin_audit_issue
 from records import SchlibFormatError, Symbol
 
 _SKIP = {"fileheader", "root entry", "storage", "sectionkeys"}
@@ -121,7 +122,7 @@ def load_library(path: Path, progress=None) -> Library:
                 continue
             symbol.data_stream = data_stream
             symbol.pin_stream = pin_stream
-            if symbol.mode_count > 1:
+            if symbol.mode_count > 1 or has_pin_audit_issue(symbol):
                 symbols.append(symbol)
     finally:
         ole.close()

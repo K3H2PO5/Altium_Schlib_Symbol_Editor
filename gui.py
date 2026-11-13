@@ -18,7 +18,7 @@ APP_TITLE = f"Altium_Schlib_Symbol_Editor {VERSION}"
 
 
 class EditorApp(tk.Tk):
-    """打开一个 SchLib，只列出有多种显示模式的符号。"""
+    """打开一个 SchLib。列出多种显示模式的符号，以及引脚重复或不连续的符号。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -29,7 +29,8 @@ class EditorApp(tk.Tk):
         self.libraries: list[Library] = []
         self._symbols: dict[str, Symbol] = {}
         self._pin_rows: dict[str, list[PinInfo]] = {}
-        self._issue_owner: dict[str, str] = {}
+        self._picked_record: int | None = None
+        self._syncing_pin_selection = False
         self._file_column = False
         self.issues: dict[str, list] = {}
         self._mode_baselines: dict[str, object] = {}
@@ -46,8 +47,9 @@ class EditorApp(tk.Tk):
         self._status_text = self.t("status_ready")
         self.status_var = tk.StringVar(value=self._status_text)
         self.filter_var = tk.StringVar()
-        self.only_current_var = tk.BooleanVar(value=True)
         self.only_issues_var = tk.BooleanVar(value=False)
+        self._issue_filter: set[str] | None = None
+        self.check_gaps_var = tk.BooleanVar(value=True)
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Control-o>", lambda _event: self.open_library())
@@ -68,13 +70,9 @@ class EditorApp(tk.Tk):
         self._close_button.configure(text=self.t("close_file"))
         self._symbol_caption.configure(text=self.t("symbol_list"))
         self._only_issues.configure(text=self.t("only_issues"))
+        self._check_gaps.configure(text=self.t("check_gaps"))
         self._filter_label.configure(text=self.t("filter"))
-        self._only_current.configure(text=self.t("only_current"))
-        self._edit_hint.configure(text=self.t("edit_hint"))
-        self.notebook.tab(self.check_tab, text=self.t("tab_check"))
-        self.notebook.tab(self.edit_tab, text=self.t("tab_edit"))
         for key, title_key in (
-            ("symbol", "col_symbol"),
             ("mode", "col_mode"),
             ("kind", "col_kind"),
             ("message", "col_detail"),
@@ -120,7 +118,7 @@ class EditorApp(tk.Tk):
         paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
         paned.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
         paned.add(self._build_symbol_pane(paned), weight=2)
-        paned.add(self._build_notebook(paned), weight=5)
+        paned.add(self._build_editor(paned), weight=5)
         ttk.Label(self, textvariable=self.status_var, padding=(8, 4)).grid(row=2, column=0, sticky="ew")
 
     def _build_symbol_pane(self, parent: ttk.Panedwindow) -> ttk.Frame:
@@ -129,13 +127,22 @@ class EditorApp(tk.Tk):
         pane.rowconfigure(3, weight=1)
         self._symbol_caption = ttk.Label(pane, text=self.t("symbol_list"))
         self._symbol_caption.grid(row=0, column=0, sticky="w")
+        checks = ttk.Frame(pane)
+        checks.grid(row=1, column=0, sticky="w")
         self._only_issues = ttk.Checkbutton(
-            pane,
+            checks,
             text=self.t("only_issues"),
             variable=self.only_issues_var,
-            command=self._fill_symbols,
+            command=self._on_only_issues,
         )
-        self._only_issues.grid(row=1, column=0, sticky="w")
+        self._only_issues.pack(side="left")
+        self._check_gaps = ttk.Checkbutton(
+            checks,
+            text=self.t("check_gaps"),
+            variable=self.check_gaps_var,
+            command=self._on_gap_check,
+        )
+        self._check_gaps.pack(side="left", padx=(12, 0))
         filter_row = ttk.Frame(pane)
         filter_row.grid(row=2, column=0, sticky="ew", pady=4)
         filter_row.columnconfigure(1, weight=1)
@@ -166,53 +173,36 @@ class EditorApp(tk.Tk):
         self.symbol_tree.bind("<<TreeviewSelect>>", self._on_symbol_event)
         return pane
 
-    def _build_notebook(self, parent: ttk.Panedwindow) -> ttk.Notebook:
-        self.notebook = ttk.Notebook(parent)
-        self.check_tab = ttk.Frame(self.notebook, padding=8)
-        self.edit_tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(self.check_tab, text=self.t("tab_check"))
-        self.notebook.add(self.edit_tab, text=self.t("tab_edit"))
-        self._build_check_tab()
+    def _build_editor(self, parent: ttk.Panedwindow) -> ttk.Frame:
+        self.edit_tab = ttk.Frame(parent, padding=8)
         self._build_edit_tab()
-        self.notebook.select(self.edit_tab)
-        return self.notebook
+        return self.edit_tab
 
-    def _build_check_tab(self) -> None:
-        self.check_tab.columnconfigure(0, weight=1)
-        self.check_tab.rowconfigure(1, weight=1)
-        self._only_current = ttk.Checkbutton(
-            self.check_tab,
-            text=self.t("only_current"),
-            variable=self.only_current_var,
-            command=self._fill_issue_view,
-        )
-        self._only_current.grid(row=0, column=0, sticky="w")
+    def _build_edit_tab(self) -> None:
+        self.edit_tab.columnconfigure(0, weight=1)
+        self.edit_tab.rowconfigure(1, weight=1)
+        issues = ttk.Frame(self.edit_tab)
+        issues.grid(row=0, column=0, sticky="ew")
+        issues.columnconfigure(0, weight=1)
         self.issue_tree = ttk.Treeview(
-            self.check_tab,
-            columns=("symbol", "mode", "kind", "message"),
+            issues,
+            columns=("mode", "kind", "message"),
             show="headings",
             selectmode="browse",
+            height=5,
         )
         for key, title_key, width, stretch in (
-            ("symbol", "col_symbol", 180, True),
-            ("mode", "col_mode", 60, False),
-            ("kind", "col_kind", 88, False),
+            ("mode", "col_mode", 160, False),
+            ("kind", "col_kind", 100, False),
             ("message", "col_detail", 480, True),
         ):
             title = self.t(title_key)
             self.issue_tree.heading(key, text=title)
             self.issue_tree.column(key, width=width, anchor="w", stretch=stretch)
-        self.issue_tree.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
-        scroll = ttk.Scrollbar(self.check_tab, orient="vertical", command=self.issue_tree.yview)
-        scroll.grid(row=1, column=1, sticky="ns", pady=(6, 0))
+        self.issue_tree.grid(row=0, column=0, sticky="ew")
+        scroll = ttk.Scrollbar(issues, orient="vertical", command=self.issue_tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
         self.issue_tree.configure(yscrollcommand=scroll.set)
-        self.issue_tree.bind("<Double-1>", self._open_issue)
-
-    def _build_edit_tab(self) -> None:
-        self.edit_tab.columnconfigure(0, weight=1)
-        self.edit_tab.rowconfigure(1, weight=1)
-        self._edit_hint = ttk.Label(self.edit_tab, text=self.t("edit_hint"), wraplength=920, justify="left")
-        self._edit_hint.grid(row=0, column=0, sticky="w")
         middle = ttk.Panedwindow(self.edit_tab, orient=tk.HORIZONTAL)
         middle.grid(row=1, column=0, sticky="nsew", pady=6)
         self._edit_split = middle
@@ -231,7 +221,7 @@ class EditorApp(tk.Tk):
         pin_xscroll = ttk.Scrollbar(pin_pane, orient="horizontal", command=self.pin_tree.xview)
         pin_xscroll.grid(row=1, column=0, sticky="ew")
         self.pin_tree.configure(yscrollcommand=pin_scroll.set, xscrollcommand=pin_xscroll.set)
-        self.pin_tree.bind("<<TreeviewSelect>>", lambda _event: self._redraw(self._selected_symbol()))
+        self.pin_tree.bind("<<TreeviewSelect>>", self._on_pin_tree_select)
         self.pin_tree.bind("<Button-3>", self._on_pin_tree_right_click)
         self._preview_missing: ttk.Label | None = None
         self._pin_menu: tk.Toplevel | None = None
@@ -254,6 +244,7 @@ class EditorApp(tk.Tk):
             self._preview_missing = label
             return None
         figure = draw_mod.ScrollFigure(parent)
+        figure.set_pin_handler(self._on_drawing_pin)
         figure.grid(row=0, column=0, sticky="nsew")
         return figure
 
@@ -288,6 +279,7 @@ class EditorApp(tk.Tk):
         self.libraries = []
         self._symbols = {}
         self._current_iid = None
+        self._picked_record = None
         self.issues = {}
         self._mode_baselines = {}
         self.filter_var.set("")
@@ -414,8 +406,11 @@ class EditorApp(tk.Tk):
         self._mode_baselines = {}
         self._index_symbols()
         self._current_iid = None
+        self._picked_record = None
         self.path_var.set(label)
         self._recheck()
+        if self.only_issues_var.get():
+            self._capture_issue_filter()
         self._fill_symbols()
         self._set_status_key(status)
 
@@ -450,20 +445,41 @@ class EditorApp(tk.Tk):
         if self._confirm_discard():
             self.destroy()
 
+    def _on_gap_check(self) -> None:
+        self._loading = True
+        try:
+            self._recheck()
+        finally:
+            self._loading = False
+        self._fill_symbols()
+
     def _recheck(self) -> None:
         self.issues = {}
+        check_gaps = self.check_gaps_var.get()
         for symbol in self._all_symbols():
-            self.issues[symbol.editor_iid] = check_symbol(symbol, self.lang)
+            self.issues[symbol.editor_iid] = check_symbol(symbol, self.lang, check_gaps=check_gaps)
             self._refresh_symbol_row(symbol)
         self._fill_issue_view()
         self._update_summary()
 
+    def _on_only_issues(self) -> None:
+        if self.only_issues_var.get():
+            self._capture_issue_filter()
+        else:
+            self._issue_filter = None
+        self._fill_symbols()
+
+    def _capture_issue_filter(self) -> None:
+        self._issue_filter = {
+            symbol.editor_iid for symbol in self._all_symbols() if self.issues.get(symbol.editor_iid)
+        }
+
     def _visible_symbols(self) -> list[Symbol]:
         text = self.filter_var.get().strip().casefold()
-        only_issues = self.only_issues_var.get()
+        pinned = self._issue_filter
         matched = []
         for symbol in self._all_symbols():
-            if only_issues and not self.issues.get(symbol.editor_iid):
+            if pinned is not None and symbol.editor_iid not in pinned:
                 continue
             if text:
                 library = self._library_for(symbol)
@@ -575,15 +591,34 @@ class EditorApp(tk.Tk):
 
     def _show_symbol(self) -> None:
         symbol = self._selected_symbol()
-        self._current_iid = None if symbol is None else symbol.editor_iid
+        iid = None if symbol is None else symbol.editor_iid
+        if iid != self._current_iid:
+            self._picked_record = None
+        self._current_iid = iid
         if symbol is None:
             self._fill_pins(None)
             self._draw(self.edit_preview, None, [])
             self._fill_issue_view()
             return
-        self._fill_pins(symbol)
+        keep = self._picked_designator(symbol)
+        self._fill_pins(symbol, keep=keep)
         self._redraw(symbol)
         self._fill_issue_view()
+
+    def _picked_designator(self, symbol: Symbol) -> str | None:
+        if self._picked_record is None:
+            return None
+        pin = self._pin_by_record(symbol, self._picked_record)
+        if pin is None:
+            self._picked_record = None
+            return None
+        return pin.designator
+
+    def _pin_by_record(self, symbol: Symbol, record: int) -> PinInfo | None:
+        for pin in symbol.pins():
+            if pin.record_index == record and not pin.broken:
+                return pin
+        return None
 
     def _configure_pin_tree(self, mode_count: int, names: list[str] | None = None) -> None:
         columns = ["designator"] + [f"m{index}" for index in range(mode_count)]
@@ -718,15 +753,85 @@ class EditorApp(tk.Tk):
         children = self.pin_tree.get_children()
         if target not in children:
             target = children[0] if children else ""
-        if target:
-            self.pin_tree.selection_set(target)
-            self.pin_tree.focus(target)
+        self._syncing_pin_selection = True
+        try:
+            if target:
+                self.pin_tree.selection_set(target)
+                self.pin_tree.focus(target)
+                self.pin_tree.see(target)
+        finally:
+            self._syncing_pin_selection = False
 
     def _selected_pin_group(self) -> list[PinInfo]:
         selection = self.pin_tree.selection()
         if not selection:
             return []
         return list(self._pin_rows.get(selection[0], []))
+
+    def _on_pin_tree_select(self, _event=None) -> None:
+        if self._syncing_pin_selection:
+            return
+        self._picked_record = None
+        self._redraw(self._selected_symbol())
+
+    def _on_drawing_pin(self, pin: PinInfo | None, button: int, x_root: int | None = None, y_root: int | None = None) -> None:
+        symbol = self._selected_symbol()
+        if symbol is None:
+            return
+        if pin is None:
+            if button == 1 and self._picked_record is not None:
+                self._picked_record = None
+                self._redraw(symbol)
+            return
+        self._picked_record = pin.record_index
+        self._fill_pins(symbol, keep=pin.designator)
+        self._redraw(symbol)
+        if button != 3:
+            return
+        chosen = pin
+        x = self.winfo_pointerx() if x_root is None else int(x_root)
+        y = self.winfo_pointery() if y_root is None else int(y_root)
+        self._schedule_choice_popup(
+            x,
+            y,
+            [(self.t("edit_pin_num"), True, lambda target=chosen: self._ask_pin_designator(target))],
+        )
+
+    def _ask_pin_designator(self, pin: PinInfo) -> None:
+        symbol = self._selected_symbol()
+        if symbol is None:
+            return
+        current = self._pin_by_record(symbol, pin.record_index)
+        if current is None:
+            return
+        value = self._ask_text(
+            self.t("edit_designator"),
+            self.t("edit_designator_prompt"),
+            initial=current.designator,
+        )
+        if value is None:
+            return
+        try:
+            result = symbol.rename_pin(current, value, current.name, all_modes=False)
+        except SchlibFormatError as exc:
+            messagebox.showerror(self.t("cannot_edit"), localize_error(self.lang, str(exc)), parent=self)
+            return
+        if result.updated == 0:
+            self._set_status_key("no_change")
+            return
+        self._picked_record = current.record_index
+        notes = [note for note in result.notes if note != self.t("unchanged_note")]
+        self._recheck()
+        self._refresh_symbol_row(symbol)
+        self._update_summary()
+        self._show_symbol()
+        self._set_status_key("pins_updated", count=result.updated)
+        if notes:
+            messagebox.showwarning(
+                self.t("pins_changed"),
+                "\n".join(localize_note(self.lang, note) for note in notes),
+                parent=self,
+            )
 
     def _on_pin_tree_right_click(self, event) -> str:
         mode_index = self._mode_index_at(event)
@@ -774,8 +879,12 @@ class EditorApp(tk.Tk):
         row = self.pin_tree.identify_row(event.y)
         if not row:
             return "break"
+        already = row in self.pin_tree.selection()
+        self._picked_record = None
         self.pin_tree.selection_set(row)
         self.pin_tree.focus(row)
+        if already:
+            self._redraw(self._selected_symbol())
         pins = list(self._pin_rows.get(row, []))
         symbol = self._selected_symbol()
         if symbol is None or not pins:
@@ -1079,47 +1188,36 @@ class EditorApp(tk.Tk):
 
     def _fill_issue_view(self) -> None:
         self.issue_tree.delete(*self.issue_tree.get_children())
-        self._issue_owner = {}
-        current = self._selected_iid()
-        index = 0
-        for symbol_iid, issues in self.issues.items():
-            if self.only_current_var.get() and symbol_iid != current:
-                continue
-            symbol = self._symbols.get(symbol_iid)
-            symbol_name = symbol.name if symbol is not None else ""
-            for issue in issues:
-                item = f"issue-{index}"
-                mode = "" if issue.mode is None or symbol is None else symbol.mode_name(issue.mode)
-                self._issue_owner[item] = symbol_iid
-                self.issue_tree.insert(
-                    "",
-                    "end",
-                    iid=item,
-                    values=(symbol_name, mode, self.t(f"kind_{issue.kind}"), issue.message),
-                )
-                index += 1
-
-    def _open_issue(self, _event=None) -> None:
-        selection = self.issue_tree.selection()
-        if not selection:
-            return
-        symbol_iid = self._issue_owner.get(selection[0])
+        symbol_iid = self._selected_iid()
         if not symbol_iid:
             return
-        if not self.symbol_tree.exists(symbol_iid):
-            self.filter_var.set("")
-        if self.symbol_tree.exists(symbol_iid):
-            self.symbol_tree.selection_set(symbol_iid)
-            self.symbol_tree.see(symbol_iid)
-            self._show_symbol()
-        self.notebook.select(self.edit_tab)
+        symbol = self._symbols.get(symbol_iid)
+        for index, issue in enumerate(self.issues.get(symbol_iid, [])):
+            mode = "" if issue.mode is None or symbol is None else symbol.mode_name(issue.mode)
+            self.issue_tree.insert(
+                "",
+                "end",
+                iid=f"issue-{index}",
+                values=(mode, self.t(f"kind_{issue.kind}"), issue.message),
+            )
+
+    def _drawing_highlight(self, symbol: Symbol, group: list[PinInfo]):
+        if self._picked_record is not None:
+            pin = self._pin_by_record(symbol, self._picked_record)
+            if pin is None:
+                self._picked_record = None
+            else:
+                return (pin.mode, pin.part_id, pin.designator, pin.record_index)
+        if not group:
+            return None
+        return (None, None, group[0].designator)
 
     def _redraw(self, symbol: Symbol | None) -> None:
         if symbol is None:
             self._draw(self.edit_preview, None, [])
             return
         group = self._selected_pin_group()
-        highlight = None if not group else (None, None, group[0].designator)
+        highlight = self._drawing_highlight(symbol, group)
         self._draw(
             self.edit_preview,
             symbol,
