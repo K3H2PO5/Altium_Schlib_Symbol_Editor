@@ -18,7 +18,7 @@ APP_TITLE = f"Altium_Schlib_Symbol_Editor {VERSION}"
 
 
 class EditorApp(tk.Tk):
-    """打开一个 SchLib。列出多种显示模式的符号，以及引脚重复或不连续的符号。"""
+    """打开一个 SchLib。列出多种显示模式的符号，以及引脚重复、不连续或隐藏名称不合法的符号。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -791,11 +791,34 @@ class EditorApp(tk.Tk):
         chosen = pin
         x = self.winfo_pointerx() if x_root is None else int(x_root)
         y = self.winfo_pointery() if y_root is None else int(y_root)
-        self._schedule_choice_popup(
-            x,
-            y,
-            [(self.t("edit_pin_num"), True, lambda target=chosen: self._ask_pin_designator(target))],
-        )
+        choices: list[tuple[str, bool, object] | None] = [
+            (self.t("edit_pin_num"), True, lambda target=chosen: self._ask_pin_designator(target)),
+        ]
+        if chosen.hidden:
+            choices.append((self.t("unhide_pin"), True, lambda target=chosen: self._unhide_pin(target)))
+        self._schedule_choice_popup(x, y, choices)
+
+    def _unhide_pin(self, pin: PinInfo) -> None:
+        symbol = self._selected_symbol()
+        if symbol is None:
+            return
+        current = self._pin_by_record(symbol, pin.record_index)
+        if current is None:
+            return
+        try:
+            changed = symbol.set_pin_hidden(current, False)
+        except SchlibFormatError as exc:
+            messagebox.showerror(self.t("cannot_edit"), localize_error(self.lang, str(exc)), parent=self)
+            return
+        if not changed:
+            self._set_status_key("no_change")
+            return
+        self._picked_record = current.record_index
+        self._recheck()
+        self._refresh_symbol_row(symbol)
+        self._update_summary()
+        self._show_symbol()
+        self._set_status_key("pin_unhidden")
 
     def _ask_pin_designator(self, pin: PinInfo) -> None:
         symbol = self._selected_symbol()

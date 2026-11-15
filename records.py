@@ -361,6 +361,23 @@ def encode_pascal(text: bytes) -> bytes:
     return bytes((len(text),)) + text
 
 
+def write_pin_hidden(payload: bytes, hidden: bool) -> bytes:
+    """只改隐藏标志。旋转、显示名称和显示位号这些位保持不动。"""
+
+    fields = parse_pin_fields(payload)
+    if fields.hidden == hidden:
+        return payload
+    index = 12
+    _description, index = _read_pascal(payload, index)
+    flag_at = index + 2
+    data = bytearray(payload)
+    if hidden:
+        data[flag_at] |= 0x04
+    else:
+        data[flag_at] &= ~0x04
+    return bytes(data)
+
+
 def replace_pin_strings(payload: bytes, name: bytes, designator: bytes) -> bytes:
     fields = parse_pin_fields(payload)
     updated = (
@@ -1098,6 +1115,20 @@ class Symbol:
             if graphic is not None:
                 rows.append(graphic)
         return rows
+
+    def set_pin_hidden(self, pin: PinInfo, hidden: bool) -> bool:
+        """只改这一只引脚的隐藏标志。已经是目标状态时返回 False。"""
+
+        if pin.broken:
+            raise SchlibFormatError("这个引脚无法解析，不能编辑")
+        record = self.records[pin.record_index]
+        if not is_pin(record):
+            raise SchlibFormatError("引脚记录已经变化，请重新选择")
+        updated = write_pin_hidden(record.payload, hidden)
+        if updated == record.payload:
+            return False
+        record.payload = updated
+        return True
 
     def rename_pin(self, pin: PinInfo, designator: str, name: str, *, all_modes: bool) -> EditResult:
         designator = _validate_pin_text("位号", designator, allow_empty=False)
